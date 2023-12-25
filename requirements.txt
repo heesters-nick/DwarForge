@@ -1,0 +1,17 @@
+astroquery
+numpy
+scipy
+matplotlib
+opencv-python
+astropy
+pandas
+scikit-learn
+scikit-image
+photutils
+sep
+joblib
+black
+ruff
+h5py
+astride
+vos
