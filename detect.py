@@ -72,7 +72,7 @@ def run_mto(
         pixel_scale = abs(header['CD1_1'] * 3600)
         params_field = pd.read_csv(param_path)
         params_field['ra'], params_field['dec'] = WCS(header).all_pix2world(
-            params_field['X'], params_field['Y'], 0
+            params_field['x'], params_field['y'], 0
         )
         params_field['re_arcsec'] = params_field.R_e * pixel_scale
         params_field['r_fwhm_arcsec'] = params_field.R_fwhm * pixel_scale
@@ -124,6 +124,7 @@ def run_mto(
         logging.info(
             f'Dwarfs selected: {np.count_nonzero(params_field["label"] == 1)}. Took {np.round(time.time() - sel_start, 3)} seconds.'
         )
+        params_field.to_csv(param_path, index=False)
 
     else:
         params_field = None

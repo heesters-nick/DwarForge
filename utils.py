@@ -1,10 +1,13 @@
-import h5py
+import logging
+import time
+
 import numpy as np
 import pandas as pd
+import sep
 from astropy import units as u
 from astropy.stats import SigmaClip
 from astroquery.gaia import Gaia
-from photutils.background import Background2D, MedianBackground
+from photutils.background import Background2D
 from sklearn.decomposition import PCA
 from vos import Client
 
@@ -12,6 +15,18 @@ client = Client()
 
 
 def func_PCA(x, y):
+    """
+    Perform principal component analysis on a set of x and y coordinates.
+
+    Args:
+        x (numpy.ndarray): x coordinates
+        y (numpy.ndarray): y coordinates
+
+    Returns:
+        axis ratio (float): axis ratio of the ellipse
+        minor axis (float): minor axis of the ellipse
+        pca (sklearn.decomposition.PCA): PCA object
+    """
     # Create a 2D array of x and y coordinates
     xy = np.column_stack((x, y))
 
@@ -31,6 +46,16 @@ def func_PCA(x, y):
 
 
 def query_gaia_stars(target_coord, r_arcsec):
+    """
+    Query Gaia DR3 for non-galaxy sources within the defined search radius.
+
+    Args:
+        target_coord (numpy.2darray): coordinates of the tile center.
+        r_arcsec (float): search radius in arcseconds.
+
+    Returns:
+        table (dataframe): non-galaxy Gaia sources within the search radius.
+    """
     Gaia.MAIN_GAIA_TABLE = 'gaiadr3.gaia_source'  # type: ignore # Select Data Release 3
     Gaia.ROW_LIMIT = -1  # unlimited rows
     columns = ['source_id', 'ra', 'dec', 'phot_g_mean_mag', 'in_galaxy_candidates']
@@ -45,7 +70,7 @@ def query_gaia_stars(target_coord, r_arcsec):
     else:
         table = table.to_pandas()
     # Remove sources that are galaxy candidates
-    table = table.loc[table['in_galaxy_candidates'] is False].reset_index(drop=True)
+    table = table.loc[~table['in_galaxy_candidates']].reset_index(drop=True)
     table.rename(columns={'phot_g_mean_mag': 'Gmag'}, inplace=True)
     # Remove sources with Gmag > 20.5
     table = table.loc[table['Gmag'] < 20.5].reset_index(drop=True)
@@ -56,50 +81,56 @@ def remove_background(image):
     """
     Remove the background from an image using background estimation and subtraction.
 
-    Parameters:
-    image (numpy.ndarray): The input image.
+    Args:
+        image (numpy.ndarray): The input image.
 
     Returns:
-    tuple: A tuple containing the following elements:
-            - data_sub (numpy.ndarray): The image with the background subtracted.
-            - orig_back (astropy.modeling.models.MedianBackground): The original background estimation model.
-            - bkg_sub (astropy.modeling.models.MedianBackground): The background estimation model after subtracting the background.
+        data_sub (numpy.ndarray): The image with the background subtracted.
+        orig_back (astropy.modeling.models.MedianBackground): The original background estimation model.
+        bkg_sub (astropy.modeling.models.MedianBackground): The background estimation model after subtracting the background.
     """
     sigma_clip = SigmaClip(sigma=3.0)
-    bkg_estim = MedianBackground()
+    # bkg_estim = MedianBackground()
     orig_bkg = Background2D(
         image,
         (200, 200),
         filter_size=(3, 3),
         sigma_clip=sigma_clip,
-        bkg_estimator=bkg_estim,  # type: ignore
+        # bkg_estimator=bkg_estim,  # type: ignore
     )
     data_sub = image - orig_bkg.background
-    bkg_sub = Background2D(
-        data_sub,
-        (200, 200),
-        filter_size=(3, 3),
-        sigma_clip=sigma_clip,
-        bkg_estimator=bkg_estim,  # type: ignore
-    )
+    # bkg_sub = Background2D(
+    #     data_sub,
+    #     (200, 200),
+    #     filter_size=(3, 3),
+    #     sigma_clip=sigma_clip,
+    #     bkg_estimator=bkg_estim,  # type: ignore
+    # )
     orig_back = orig_bkg
-    return data_sub, orig_back, bkg_sub
+    return data_sub, orig_back
+
+
+def get_background(data, thresh=1, bw=200, bh=200, mask=None):
+    image_c = data.byteswap().newbyteorder()
+    bkg = sep.Background(image_c, maskthresh=thresh, bw=bw, bh=bh, mask=mask)
+    bkg.subfrom(image_c)
+    return image_c, bkg.globalrms
 
 
 def piecewise_function_with_break_global(x, break_point, a, b, c, d):
     """
     Compute the piecewise function with a break point.
 
-    Parameters:
-    x (float or array-like): The input values.
-    break_point (float): The break point value.
-    a (float): Coefficient for the exponential term before the break point.
-    b (float): Coefficient for the exponential term.
-    c (float): Constant term before the break point.
-    d (float): Coefficient for the exponential term after the break point.
+    Args:
+        x (float or array-like): The input values.
+        break_point (float): The break point value.
+        a (float): Coefficient for the exponential term before the break point.
+        b (float): Coefficient for the exponential term.
+        c (float): Constant term before the break point.
+        d (float): Coefficient for the exponential term after the break point.
 
     Returns:
-    float or array-like: The computed values of the piecewise function.
+        float or array-like: The computed values of the piecewise function.
 
     """
     result = np.where(
@@ -114,14 +145,14 @@ def power_law(x, a, b, c):
     """
     Calculate the power law function.
 
-    Parameters:
-    x (float or array-like): The input value(s).
-    a (float): The coefficient of the power law.
-    b (float): The exponent of the power law.
-    c (float): The constant offset.
+    Args:
+        x (float or array-like): The input value(s).
+        a (float): The coefficient of the power law.
+        b (float): The exponent of the power law.
+        c (float): The constant offset.
 
     Returns:
-    float or array-like: The result of the power law function.
+        float or array-like: The result of the power law function.
     """
     result = (a * x) ** (-b) + c
     return np.where(result < 0, 0, result)
@@ -131,15 +162,15 @@ def piecewise_linear(x, x0, a1, a2, b):
     """
     Computes the piecewise linear function.
 
-    Parameters:
-    - x (float or array-like): Input array or scalar.
-    - x0 (float): Threshold value for the piecewise function.
-    - a1 (float): Slope of the function for x <= x0.
-    - a2 (float): Slope of the function for x > x0.
-    - b (float): Intercept of the function.
+    Args:
+        x (float or array-like): Input array or scalar.
+        x0 (float): Threshold value for the piecewise function.
+        a1 (float): Slope of the function for x <= x0.
+        a2 (float): Slope of the function for x > x0.
+        b (float): Intercept of the function.
 
     Returns:
-    - float or array-like: Output array or scalar with the same shape as x.
+        float or array-like: Output array or scalar with the same shape as x.
     """
     return np.where(x <= x0, a1 * (x - x0) + b, a2 * (x - x0) + b)
 
@@ -147,9 +178,13 @@ def piecewise_linear(x, x0, a1, a2, b):
 def relate_coord_tile(coords=None, nums=None):
     """
     Conversion between tile numbers and coordinates.
-    :param coords: right ascention, declination; tuple
-    :param nums: first and second tile numbers; tuple
-    :return: depending on the input, return the tile numbers or the ra and dec coordinates
+
+    Args:
+        right ascention, declination (tuple): ra and dec coordinates
+        nums (tuple): first and second tile numbers
+
+    Returns:
+        tuple: depending on the input, return the tile numbers or the ra and dec coordinates
     """
     if coords:
         ra, dec = coords
@@ -166,8 +201,12 @@ def relate_coord_tile(coords=None, nums=None):
 def tile_coordinates(name):
     """
     Extract RA and Dec from tile name
-    :param name: .fits file name of a given tile
-    :return RA and Dec of the tile center
+
+    Args:
+        name (str): .fits file name of a given tile
+
+    Returns:
+        ra, dec (tuple): RA and Dec of the tile center
     """
     parts = name.split('.')
     if name.startswith('calexp'):
@@ -181,15 +220,46 @@ def tile_coordinates(name):
 def update_available_tiles(path, save=True):
     """
     Update available tile lists from the VOSpace. Takes a few mins to run.
-    :param path: path to save tile lists.
-    :param save: save new lists to disk, default is True.
-    :return: /
+
+    Args:
+        path (str): path to save tile lists.
+        save (bool): save new lists to disk, default is True.
+
+    Returns:
+        None
     """
+    logging.info('Updating available tile lists from the VOSpace.')
+    logging.info('Retrieving u-band tiles...')
+    start_u = time.time()
     cfis_u_tiles = client.glob1('vos:cfis/tiles_DR5/', '*u.fits')
+    end_u = time.time()
+    logging.info(
+        f'Retrieving u-band tiles completed. Took {np.round((end_u-start_u)/60, 3)} minutes.'
+    )
+    logging.info('Retrieving g-band tiles...')
     whigs_g_tiles = client.glob1('vos:cfis/whigs/stack_images_CFIS_scheme/', '*.fits')
+    end_g = time.time()
+    logging.info(
+        f'Retrieving g-band tiles completed. Took {np.round((end_g-end_u)/60, 3)} minutes.'
+    )
+    logging.info('Retrieving r-band tiles...')
     cfis_lsb_r_tiles = client.glob1('vos:cfis/tiles_LSB_DR5/', '*.fits')
+    end_r = time.time()
+    logging.info(
+        f'Retrieving r-band tiles completed. Took {np.round((end_r-end_g)/60, 3)} minutes.'
+    )
+    logging.info('Retrieving i-band tiles...')
     ps_i_tiles = client.glob1('vos:cfis/panstarrs/DR3/tiles/', '*i.fits')
+    end_i = time.time()
+    logging.info(
+        f'Retrieving i-band tiles completed. Took {np.round((end_i-end_r)/60, 3)} minutes.'
+    )
+    logging.info('Retrieving z-band tiles...')
     wishes_z_tiles = client.glob1('vos:cfis/wishes_1/coadd/', '*.fits')
+    end_z = time.time()
+    logging.info(
+        f'Retrieving z-band tiles completed. Took {np.round((end_z-end_i)/60, 3)} minutes.'
+    )
     if save:
         np.savetxt(path + 'cfis_u_tiles.txt', cfis_u_tiles, fmt='%s')
         np.savetxt(path + 'whigs_g_tiles.txt', whigs_g_tiles, fmt='%s')
@@ -201,8 +271,12 @@ def update_available_tiles(path, save=True):
 def load_available_tiles(path):
     """
     Load tile lists from disk.
-    :param path: path to files
-    :return: lists of available tiles for the five bands
+
+    Args:
+        path (str): path to files
+
+    Returns:
+        tuple: lists of available tiles for the five bands
     """
     u_tiles = np.loadtxt(path + 'cfis_u_tiles.txt', dtype=str)
     g_tiles = np.loadtxt(path + 'whigs_g_tiles.txt', dtype=str)
@@ -216,8 +290,12 @@ def load_available_tiles(path):
 def get_tile_numbers(name):
     """
     Extract tile numbers from tile name
-    :param name: .fits file name of a given tile
-    :return two three digit tile numbers
+
+    Args:
+        name (str): .fits file name of a given tile
+
+    Returns:
+        tuple: two three digit tile numbers
     """
     parts = name.split('.')
     if name.startswith('calexp'):
@@ -229,8 +307,12 @@ def get_tile_numbers(name):
 def extract_tile_numbers(tile_lists):
     """
     Extract tile numbers from .fits file names.
-    :param tile_lists: lists of file names from the different bands
-    :return: lists of tile numbers available in the different bands
+
+    Args:
+        tile_lists (list): lists of file names from the different bands
+
+    Returns:
+        list: lists of tile numbers available in the different bands
     """
     u_nums = np.array([get_tile_numbers(name) for name in tile_lists[0]])
     g_nums = np.array([get_tile_numbers(name) for name in tile_lists[1]])
@@ -303,20 +385,3 @@ class TileAvailability:
             print(f'In {bands_available} bands: {count}')
 
         print(f'\nNumber of unique tiles available:\n{len(self.unique_tiles)}')
-
-
-def read_h5(cutout_dir):
-    """
-    Reads cutout data from HDF5 file
-    :param cutout_dir: cutout directory
-    :return: cutout data
-    """
-    with h5py.File(cutout_dir, 'r') as f:
-        # Create empty dictionaries to store data for each group
-        cutout_data = {}
-
-        # Loop through datasets
-        for dataset_name in f:
-            data = np.array(f[dataset_name])
-            cutout_data[dataset_name] = data
-    return cutout_data

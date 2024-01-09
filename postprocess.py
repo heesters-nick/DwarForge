@@ -6,7 +6,7 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 
 
-def match_detections_with_catalogs(tile_nums, params_mto, table_dir):
+def match_detections_with_catalogs(tile_nums, params_mto, table_dir, unions_cat=False):
     """
     Match detections to known objects. Return all dwarf candidates.
 

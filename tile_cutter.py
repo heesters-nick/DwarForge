@@ -10,7 +10,6 @@ from astropy.nddata import Cutout2D
 from astropy.wcs.utils import skycoord_to_pixel
 
 from kd_tree import TileWCS, query_tree, relate_coord_tile
-from main import band_dict
 
 
 def tile_finder(avail, catalog, coord_c, tile_info_dir, band_constr=5):
@@ -114,7 +113,7 @@ def download_tile_all_bands(avail, tile_numbers, in_dict, download_dir):
     """
     tile_dir = download_dir + f'{str(tile_numbers[0]).zfill(3)}_{str(tile_numbers[1]).zfill(3)}'
     avail_idx = avail.get_availability(tile_numbers)[1]
-    for band in np.array(list(band_dict.keys()))[avail_idx]:
+    for band in np.array(list(in_dict.keys()))[avail_idx]:
         vos_dir = in_dict[band]['vos']
         prefix = in_dict[band]['name']
         suffix = in_dict[band]['suffix']
@@ -250,3 +249,20 @@ def save_to_h5(stacked_cutout, tile_numbers, ids, ras, decs, size, avail_bands, 
         hf.create_dataset('ra', data=ras.astype(np.float32))
         hf.create_dataset('dec', data=decs.astype(np.float32))
     pass
+
+
+def read_h5(cutout_dir):
+    """
+    Reads cutout data from HDF5 file
+    :param cutout_dir: cutout directory
+    :return: cutout data
+    """
+    with h5py.File(cutout_dir, 'r') as f:
+        # Create empty dictionaries to store data for each group
+        cutout_data = {}
+
+        # Loop through datasets
+        for dataset_name in f:
+            data = np.array(f[dataset_name])
+            cutout_data[dataset_name] = data
+    return cutout_data
