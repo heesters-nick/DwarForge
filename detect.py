@@ -9,8 +9,10 @@ import pandas as pd
 import sep
 from astropy.wcs import WCS
 
+logger = logging.getLogger()
 
-def run_mto(
+
+def run_mto_old(
     tile_nums,
     file_path,
     model_dir,
@@ -28,7 +30,7 @@ def run_mto(
     file_dir = os.path.dirname(file_path)
     out_path = os.path.join(file_dir, tile_name + '_seg.fits')
     mto_start = time.time()
-    logging.info(f'Running MTO on file: {fits_name}')
+    logger.info(f'Running MTO on file: {fits_name}')
     param_path = os.path.join(file_dir, tile_name + '_det_params.csv')
     exec_str = f'python {mto_path} {file_path} -par_out {param_path}'
     exec_str_seg = f'python {mto_path} {file_path} -out {out_path} -par_out {param_path}'
@@ -37,36 +39,36 @@ def run_mto(
     try:
         result_mto = subprocess.run(exec_str, shell=True, stderr=subprocess.PIPE, text=True)
         result_mto.check_returncode()
-        logging.info(
+        logger.info(
             f'Successfully ran MTO on tile {tuple(tile_nums)} for band {band}. \n Finished in  {np.round((time.time() - mto_start)/60, 3)} minutes.'
         )
 
     except subprocess.CalledProcessError as e:
-        logging.error(f'Tile {tuple(tile_nums)} failed to download in {band}.')
-        logging.exception(f'Subprocess error details: {e}')
+        logger.error(f'Tile {tuple(tile_nums)} failed to download in {band}.')
+        logger.exception(f'Subprocess error details: {e}')
 
-        logging.info('Trying to run MTO with Source Extractor background estimation..')
+        logger.info('Trying to run MTO with Source Extractor background estimation..')
         try:
             mto_start_se = time.time()
             exec_str_se = f'python {mto_path} {file_path} -out {out_path} -par_out {param_path} -bg_variance {bkg.background_rms_median**2} -bg_mean {np.mean(bkg.background())}'
             result_mto = subprocess.run(exec_str_se, shell=True, stderr=subprocess.PIPE, text=True)
             result_mto.check_returncode()
-            logging.info(
+            logger.info(
                 f'Successfully ran MTO using Source Extractor background estimation on tile {tuple(tile_nums)} for band {band}. \n Finished in  {np.round((time.time() - mto_start_se)/60, 3)} minutes.'
             )
 
         except subprocess.CalledProcessError as e:
-            logging.error(
+            logger.error(
                 f'Failed running MTO on Tile {tuple(tile_nums)} in {band} with Source Extractor background estimation.'
             )
-            logging.exception(f'Subprocess error details: {e}')
+            logger.exception(f'Subprocess error details: {e}')
             return None, None
 
     except Exception as e:
-        logging.error(f'Tile {tuple(tile_nums)} in {band}: an unexpected error occurred: {e}')
+        logger.error(f'Tile {tuple(tile_nums)} in {band}: an unexpected error occurred: {e}')
         return None, None
 
-    logging.info('Loading detections.., selecting dwarfs..')
+    logger.info('Loading detections.., selecting dwarfs..')
     sel_start = time.time()
     if os.path.exists(param_path):
         pixel_scale = abs(header['CD1_1'] * 3600)
@@ -121,16 +123,94 @@ def run_mto(
         # Use the loaded model for predictions or further analysis
         predictions = loaded_model.predict(df_for_pred)
         params_field['label'] = predictions
-        logging.info(
+        logger.info(
             f'Dwarfs selected: {np.count_nonzero(params_field["label"] == 1)}. Took {np.round(time.time() - sel_start, 3)} seconds.'
         )
         params_field.to_csv(param_path, index=False)
 
     else:
         params_field = None
-        logging.error('No parameter file found. Check what went wrong.')
+        logger.error('No parameter file found. Check what went wrong.')
 
     return params_field
+
+
+def run_mto(
+    file_path,
+    band,
+    mto_path='./mto.py',
+    with_segmap=False,
+    move_factor=0.5,
+    min_distance=0.1,
+):
+    # paths
+    fits_name = os.path.basename(file_path)
+    tile_name = os.path.splitext(fits_name)[0]
+    file_dir = os.path.dirname(file_path)
+    out_path = os.path.join(file_dir, tile_name + '_seg.fits')
+
+    mto_start = time.time()
+    logger.info(f'Running MTO on file: {fits_name}')
+    param_path = os.path.join(file_dir, tile_name + '_det_params.csv')
+    exec_str = f'python {mto_path} {file_path} -par_out {param_path}'
+    exec_str_seg = f'python {mto_path} {file_path} -out {out_path} -par_out {param_path} -move_factor {move_factor} -min_distance {min_distance}'
+    if with_segmap:
+        exec_str = exec_str_seg
+    try:
+        result_mto = subprocess.run(exec_str, shell=True, stderr=subprocess.PIPE, text=True)
+        result_mto.check_returncode()
+        logger.info(
+            f'Successfully ran MTO on tile {tile_name} for band {band}. \nFinished in  {np.round((time.time() - mto_start), 2)} seconds.'
+        )
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f'Tile {tile_name} failed to download in {band}.')
+        logger.error(f'Subprocess error details: {e}')
+
+    return param_path
+
+
+def param_phot(param_path, header, zp=30.0, mu_min=19.0, reff_min=1.4):
+    params_field = pd.read_csv(param_path)
+    mto_all = params_field.copy()
+    params_field['ra'], params_field['dec'] = WCS(header).all_pix2world(
+        params_field['X'], params_field['Y'], 0
+    )
+    pixel_scale = abs(header['CD1_1'] * 3600)
+    params_field['re_arcsec'] = params_field.R_e * pixel_scale
+    params_field['r_fwhm_arcsec'] = params_field.R_fwhm * pixel_scale
+    params_field['r_10_arcsec'] = params_field.R10 * pixel_scale
+    params_field['r_90_arcsec'] = params_field.R90 * pixel_scale
+    params_field['A_arcsec'] = params_field.A * pixel_scale
+    params_field['B_arcsec'] = params_field.B * pixel_scale
+    params_field['axis_ratio'] = np.minimum(
+        params_field['A_arcsec'], params_field['B_arcsec']
+    ) / np.maximum(params_field['A_arcsec'], params_field['B_arcsec'])
+    params_field['mag'] = -2.5 * np.log10(params_field.total_flux) + zp
+    params_field['mu'] = np.where(
+        (params_field['A_arcsec'] > 0) & (params_field['B_arcsec'] > 0),
+        params_field.mag
+        + 0.752
+        + 2.5
+        * np.log10(
+            np.pi * params_field.re_arcsec**2 * params_field.B_arcsec / params_field.A_arcsec
+        ),
+        params_field.mag + 0.752 + 2.5 * np.log10(np.pi * params_field.re_arcsec**2),
+    )
+    params_field = params_field[~params_field.isin([np.inf, -np.inf]).any(axis=1)].reset_index(
+        drop=True
+    )
+    params_field = params_field.loc[
+        (params_field['mu'] > mu_min)
+        & (params_field['re_arcsec'] > reff_min)
+        & (params_field['axis_ratio'] > 0.1)
+    ].reset_index(drop=True)
+    # Remove streaks
+    params_field = params_field[
+        (params_field['axis_ratio'] >= 0.17) | (params_field['n_pix'] <= 1000)
+    ]
+
+    return params_field, mto_all
 
 
 def source_detection(image, thresh=3.0, minarea=5):
@@ -148,7 +228,7 @@ def source_detection(image, thresh=3.0, minarea=5):
         bkg (sep.Background): The background estimation model.
         segmap (numpy.ndarray): The segmentation map.
     """
-    logging.info('starting sep')
+    logger.info('starting sep')
     image_c = image.byteswap().newbyteorder()
     bkg = sep.Background(image_c, maskthresh=thresh, bw=128)
     data_sub = image_c - bkg
@@ -161,5 +241,5 @@ def source_detection(image, thresh=3.0, minarea=5):
         deblend_nthresh=32,
         deblend_cont=0.005,
     )
-    logging.info('finished sep')
+    logger.info('finished sep')
     return objects, data_sub, bkg, segmap

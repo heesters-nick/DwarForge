@@ -1,9 +1,12 @@
+import logging
 import os
 
 import numpy as np
 import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+
+logger = logging.getLogger()
 
 
 def match_detections_with_catalogs(tile_nums, params_mto, table_dir, unions_cat=False):
@@ -25,7 +28,7 @@ def match_detections_with_catalogs(tile_nums, params_mto, table_dir, unions_cat=
     known_dwarfs = pd.concat((x.query(tile_filter) for x in gen), ignore_index=True)
     c_known_dwarfs = SkyCoord(known_dwarfs['ra'], known_dwarfs['dec'], unit='deg', frame='icrs')
 
-    known_matches, known_unmatches, detection_matches = match_cats(
+    known_matches, known_unmatches, detection_matches = match_cats_old(
         detections, c_detections, known_dwarfs, c_known_dwarfs
     )
     # initialize an empty dataframe for potential detected but not seleced known dwarfs
@@ -39,7 +42,7 @@ def match_detections_with_catalogs(tile_nums, params_mto, table_dir, unions_cat=
         c_non_detections = SkyCoord(
             non_detections['ra'], non_detections['dec'], unit='deg', frame='icrs'
         )
-        _, known_unmatches, non_detection_matches = match_cats(
+        _, known_unmatches, non_detection_matches = match_cats_old(
             non_detections, c_non_detections, known_unmatches, c_known_unmatches
         )
 
@@ -59,7 +62,7 @@ def match_detections_with_catalogs(tile_nums, params_mto, table_dir, unions_cat=
     return candidates
 
 
-def match_cats(det, c_det, known, c_known, max_sep=15.0 * u.arcsec):
+def match_cats_old(det, c_det, known, c_known, max_sep=15.0 * u.arcsec):
     """
     Match detections to known objects, return matches, unmatches
 
@@ -83,3 +86,76 @@ def match_cats(det, c_det, known, c_known, max_sep=15.0 * u.arcsec):
     det_matches = det.loc[idx[sep_constraint]].reset_index(drop=True)
 
     return known_matches, known_unmatches, det_matches
+
+
+def match_cats(df_det, df_label, max_sep=15.0):
+    """
+    Match detections to known objects, return matches, unmatches
+
+    Args:
+        df_det (dataframe): detections dataframe
+        df_label (dataframe): dataframe of objects with labels
+        max_sep (float): maximum separation tollerance
+
+    Returns:
+        det_matching_idx (list): indices of detections for which labels are available
+        label_matches (dataframe): known objects that were detected
+        det_matches (dataframe): detections that are known objects
+    """
+    c_det = SkyCoord(df_det['ra'], df_det['dec'], unit='deg')
+    c_label = SkyCoord(df_label['ra'], df_label['dec'], unit='deg')
+
+    idx, d2d, _ = c_label.match_to_catalog_3d(c_det)
+    # sep_constraint is a list of True/False
+    sep_constraint = d2d < max_sep * u.arcsec
+    label_matches = df_label[sep_constraint].reset_index(drop=True)
+    label_unmatches = df_label[~sep_constraint].reset_index(drop=True)
+    det_matching_idx = idx[sep_constraint]  # det_matching_idx is a list of indices
+    det_matches = df_det.loc[det_matching_idx].reset_index(drop=True)
+    return det_matching_idx, label_matches, label_unmatches, det_matches
+
+
+def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
+    det_df_updated = det_df.copy()
+    det_idx_lsb, lsb_matches, lsb_unmatches, _ = match_cats(det_df_updated, dwarfs_df, max_sep=10.0)
+    det_idx_lsb = det_idx_lsb.astype(np.int32)
+    # add lsb labels to detections dataframe
+    det_df_updated.loc['lsb'] = np.nan
+    det_df_updated.loc['ID_known'] = np.nan
+    if len(det_idx_lsb) > 0:
+        det_df_updated.loc[det_idx_lsb, 'lsb'] = 1
+        det_df_updated.loc[det_idx_lsb, 'ID_known'] = lsb_matches['ID'].values
+
+    logger.debug(
+        f'Added {np.count_nonzero(~np.isnan(det_df_updated["lsb"]))} LSB labels to the detection dataframe for tile {tile} in band {band}.'
+    )
+
+    if len(lsb_unmatches) > 0:
+        # Check unfiltered dataframe for known objects that were filtered out
+        _, full_lsb_matches, full_lsb_unmatches, full_det_matches = match_cats(
+            det_df_full, lsb_unmatches, max_sep=10.0
+        )
+
+        if len(full_lsb_matches) > 0:
+            logger.warning(
+                f'Found {len(full_lsb_matches)} known dwarfs in the unfiltered detections that were filtered out in tile {tile} in band {band}.'
+            )
+
+            # Create a new dataframe with the filtered out detections
+            new_rows = full_det_matches.copy()
+            new_rows['lsb'] = 1
+            new_rows['ID_known'] = full_lsb_matches['ID'].values
+
+            # Concatenate the new rows to det_df_updated
+            det_df_updated = pd.concat([det_df_updated, new_rows], ignore_index=True)
+
+            logger.info(
+                f'Added back {len(full_lsb_matches)} known dwarfs that were initially filtered out in tile {tile} in band {band}. Their mu values are: {full_lsb_matches["mu"].values}, their r_eff values are {full_lsb_matches["re_arcsec"].values}.'
+            )
+
+        if len(full_lsb_unmatches) > 0:
+            logger.warning(
+                f'Found {len(full_lsb_unmatches)} undetected but known dwarfs in tile {tile} in band {band}. Their IDs are: {full_lsb_unmatches["ID"].values}.'
+            )
+
+    return det_df_updated

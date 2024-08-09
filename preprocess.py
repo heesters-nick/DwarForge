@@ -24,6 +24,8 @@ from utils import (
     query_gaia_stars,
 )
 
+logger = logging.getLogger()
+
 
 def open_fits(file_path, fits_ext):
     """
@@ -37,11 +39,11 @@ def open_fits(file_path, fits_ext):
         data (numpy.ndarray): image data
         header (fits header): header of the fits file
     """
-    logging.info(f'Opening fits file {os.path.basename(file_path)}..')
+    logger.debug(f'Opening fits file {os.path.basename(file_path)}..')
     with fits.open(file_path, memmap=True) as hdul:
         data = hdul[fits_ext].data  # type: ignore
         header = hdul[fits_ext].header  # type: ignore
-    logging.info(f'Fits file {os.path.basename(file_path)} opened.')
+    logger.debug(f'Fits file {os.path.basename(file_path)} opened.')
     return data, header
 
 
@@ -59,10 +61,10 @@ def find_stars(file_path, tile_dim, coord, search_radius, wcs):
     Returns:
     - star_df (DataFrame): DataFrame containing information about the stars found in and around the field.
     """
-    logging.info(f'Querying Gaia for tile {os.path.basename(file_path)}..')
+    logger.info(f'Querying Gaia for tile {os.path.basename(file_path)}..')
     star_df = query_gaia_stars(coord, search_radius)
     if star_df.empty:
-        logging.info(f'No stars found in tile {os.path.basename(file_path)}.')
+        logger.info(f'No stars found in tile {os.path.basename(file_path)}.')
         return star_df
     c_star = SkyCoord(ra=star_df.ra, dec=star_df.dec, unit='deg', frame='icrs')
     x_star, y_star = wcs.world_to_pixel(c_star)
@@ -76,7 +78,7 @@ def find_stars(file_path, tile_dim, coord, search_radius, wcs):
 
     star_df = star_df[mask].reset_index(drop=True)
     star_df['x'], star_df['y'] = x_star[mask], y_star[mask]
-    logging.info(f'Stars found in tile {os.path.basename(file_path)}.')
+    logger.info(f'Stars found in tile {os.path.basename(file_path)}.')
 
     return star_df
 
@@ -214,12 +216,12 @@ def star_mask(file_path, data, header, folder=None, survey=None):
     Returns:
         masked image data (array)
     """
-    logging.info(f'Removing background for tile {os.path.basename(file_path)}..')
+    logger.info(f'Removing background for tile {os.path.basename(file_path)}..')
     bkg_start = time.time()
     data[data == 0] = np.nan
     # data_sub, bkg_orig = remove_background(data)
     data_sub, bkg_rms = get_background(data)
-    logging.info(
+    logger.info(
         f'Background for tile {os.path.basename(file_path)} removed! Took {np.round(time.time() - bkg_start)} seconds.'
     )
 
@@ -236,7 +238,7 @@ def star_mask(file_path, data, header, folder=None, survey=None):
     star_df = find_stars(file_path, [tile_height, tile_width], tile_coord, search_radius, wcs)
     star_df = star_fit(star_df)
 
-    logging.info(f'Masking stars for tile {os.path.basename(file_path)}..')
+    logger.info(f'Masking stars for tile {os.path.basename(file_path)}..')
     x_arr, y_arr, r_arr, len_arr, thick_arr = (
         star_df.x.values,
         star_df.y.values,
@@ -313,7 +315,7 @@ def star_mask(file_path, data, header, folder=None, survey=None):
     gaussian_noise = np.random.normal(0, bkg_rms, np.count_nonzero(star_neg_mask))
     data_masked = np.copy(data_sub)
     data_masked[star_neg_mask != 0] = gaussian_noise
-    logging.info(f'Stars masked for tile {os.path.basename(file_path)}')
+    logger.info(f'Stars masked for tile {os.path.basename(file_path)}')
 
     with open('bkg_rms_median.txt', 'w') as f:
         f.write(str(bkg_rms))
@@ -336,7 +338,7 @@ def streak_mask(data_masked, file_path, bkg_rms, table_dir, header, psf_multipli
     Returns:
             numpy.ndarray: streak masked image data
     """
-    logging.info(f'Masking streaks in tile {os.path.basename(file_path)}.')
+    logger.info(f'Masking streaks in tile {os.path.basename(file_path)}.')
     seeing_arcsec = header['IQFINAL']
     pix_scale = abs(header['CD1_1'] * 3600)
     seeing_pix = seeing_arcsec / pix_scale
@@ -363,7 +365,7 @@ def streak_mask(data_masked, file_path, bkg_rms, table_dir, header, psf_multipli
     # delete the padded file
     os.remove(out_file)
     if streak.streaks is None:
-        logging.info(f'No streaks found in tile {os.path.basename(file_path)}.')
+        logger.info(f'No streaks found in tile {os.path.basename(file_path)}.')
         return data_masked
     streaks = pd.DataFrame.from_dict(streak.streaks)  # type: ignore
     # streak.write_outputs()
@@ -426,9 +428,9 @@ def streak_mask(data_masked, file_path, bkg_rms, table_dir, header, psf_multipli
         # replace masked region with gaussian noise
         gaussian_noise = np.random.normal(0, bkg_rms, np.count_nonzero(expanded_mask))
         data_masked[expanded_mask != 0] = gaussian_noise
-        logging.info(f'Streaks masked in tile {os.path.basename(file_path)}.')
+        logger.info(f'Streaks masked in tile {os.path.basename(file_path)}.')
     else:
-        logging.info(f'No streaks found in tile {os.path.basename(file_path)}.')
+        logger.info(f'No streaks found in tile {os.path.basename(file_path)}.')
 
     return data_masked
 
@@ -446,7 +448,7 @@ def smooth_image(data_masked, file_path, header, psf_multiplier=2.0):
     Returns:
         numpy.ndarray: smoothed image data
     """
-    logging.info(f'Smoothing tile {os.path.basename(file_path)}..')
+    logger.info(f'Smoothing tile {os.path.basename(file_path)}..')
     smoothing_start = time.time()
     wcs = WCS(header)
     seeing_arcsec = header['IQFINAL']
@@ -456,37 +458,98 @@ def smooth_image(data_masked, file_path, header, psf_multiplier=2.0):
     kernel = Gaussian2DKernel(
         x_stddev=psf_multiplier * seeing_pix * gaussian_fwhm_to_sigma, mode='oversample', factor=1
     )
-    logging.info(
+    logger.info(
         f'Kernel for tile {os.path.basename(file_path)} created. Took {np.round(time.time() - kernel_start)} seconds.'
     )
     data_conv = convolve(data_masked, kernel)
     hdu_new = fits.PrimaryHDU(data_conv, wcs.to_header())
     out_file = os.path.splitext(file_path)[0] + '_star_masked_smooth.fits'
     hdu_new.writeto(out_file, overwrite=True)
-    logging.info(
+    logger.info(
         f'Tile {os.path.basename(file_path)} smoothed. Took {np.round(time.time() - smoothing_start)} seconds.'
     )
     pass
 
 
-def prep_tile(file_path, fits_ext, table_dir, with_streak_mask):
+def save_processed(data_binned, header, file_path, bin_size, preprocess_type, update_header=True):
+    # out path
+    directory, filename = os.path.split(file_path)
+    # Split the filename into name and extension
+    name, extension = os.path.splitext(filename)
+    # Create the new filename
+    new_filename = f'{name}_{preprocess_type}{extension}'
+    # Combine the directory and new filename
+    out_path = os.path.join(directory, new_filename)
+    # wcs
+    wcs = WCS(header)
+
+    if update_header:
+        wcs.wcs.cd *= bin_size
+        wcs.wcs.crpix = (wcs.wcs.crpix - 0.5) / bin_size + 0.5
+
+        # Update the image dimensions in the header
+        new_header = header.copy()
+        new_header['NAXIS1'] = data_binned.shape[1]
+        new_header['NAXIS2'] = data_binned.shape[0]
+
+        # Update the CD matrix in the header
+        new_header['CD1_1'] = wcs.wcs.cd[0, 0]
+        new_header['CD1_2'] = wcs.wcs.cd[0, 1]
+        new_header['CD2_1'] = wcs.wcs.cd[1, 0]
+        new_header['CD2_2'] = wcs.wcs.cd[1, 1]
+
+        # Update CRPIX values
+        new_header['CRPIX1'] = wcs.wcs.crpix[0]
+        new_header['CRPIX2'] = wcs.wcs.crpix[1]
+
+        # Update the WCS information in the header
+        new_header.update(wcs.to_header())
+    else:
+        new_header = header.copy()
+
+    # Create a new HDU with the rebinned data and updated header
+    new_hdu = fits.PrimaryHDU(data=data_binned, header=new_header)
+
+    # save new fits file
+    new_hdu.writeto(out_path, overwrite=True)
+
+    return out_path, new_header
+
+
+def adjust_flux_with_zp(flux, current_zp, standard_zp):
+    adjusted_flux = flux * 10 ** (-0.4 * (current_zp - standard_zp))
+    return adjusted_flux
+
+
+def bin_image_cv2(image, bin_size):
+    return cv2.resize(
+        image,
+        (image.shape[1] // bin_size, image.shape[0] // bin_size),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
+def prep_tile(file_path, fits_ext, zp, bin_size=4):
     """
     Preprocess a tile for detection with MTO. This includes masking stars and streaks, and smoothing the image.
 
     Args:
         file_path (str): path to the fits file
         fits_ext (int): fits extension, 0 or 1
-        table_dir (str): path to the table directory
-        with_streak_mask (bool, optional): mask streaks in the image. Defaults to True.
+        zp (float): photometric zeropoint for this tile
+        bin_size (int, optional): bin factor, defaults to 4
+    Returns:
+        str, str: path to preprocessed file, header of preprocessed file
     """
     # read in data and header
     data, header = open_fits(file_path, fits_ext)
-    # mask stars
-    data_masked, bkg_rms = star_mask(file_path, data, header)
-    # mask streaks
-    if with_streak_mask:
-        data_masked = streak_mask(data_masked, file_path, bkg_rms, table_dir, header)
-    # smooth image
-    smooth_image(data_masked, file_path, header)
-
-    return bkg_rms, header
+    # adjust zeropoint
+    if zp != 30.0:
+        data = adjust_flux_with_zp(data, current_zp=zp, standard_zp=30.0)
+    # bin image to increase signal-to-noise + aid LSB detection
+    binned_image = bin_image_cv2(data, bin_size)
+    # save preprocessed image to fits
+    file_path_binned, header_binned = save_processed(
+        binned_image, header, file_path, bin_size, preprocess_type='rebin'
+    )
+    return file_path_binned, header_binned

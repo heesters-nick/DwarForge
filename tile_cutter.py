@@ -11,6 +11,8 @@ from astropy.wcs.utils import skycoord_to_pixel
 
 from kd_tree import TileWCS, query_tree, relate_coord_tile
 
+logger = logging.getLogger()
+
 
 def tile_finder(avail, catalog, coord_c, tile_info_dir, band_constr=5):
     """
@@ -64,13 +66,31 @@ def tile_finder(avail, catalog, coord_c, tile_info_dir, band_constr=5):
     return unique_tiles, tiles_x_bands, catalog
 
 
+def tile_band_specs(tile, in_dict, band, download_dir):
+    vos_dir = in_dict[band]['vos']
+    prefix = in_dict[band]['name']
+    suffix = in_dict[band]['suffix']
+    delimiter = in_dict[band]['delimiter']
+    zfill = in_dict[band]['zfill']
+    fits_ext = in_dict[band]['fits_ext']
+    zp = in_dict[band]['zp']
+    tile_dir = os.path.join(download_dir, f'{str(tile[0]).zfill(3)}_{str(tile[1]).zfill(3)}')
+    os.makedirs(tile_dir, exist_ok=True)
+    tile_fitsfilename = f'{prefix}{delimiter}{str(tile[0]).zfill(zfill)}{delimiter}{str(tile[1]).zfill(zfill)}{suffix}'
+    temp_name = '.'.join(tile_fitsfilename.split('.')[:-1]) + '_temp.fits'
+    temp_path = os.path.join(tile_dir, temp_name)
+    final_path = os.path.join(tile_dir, tile_fitsfilename)
+    vos_path = os.path.join(vos_dir, tile_fitsfilename)
+    return tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp
+
+
 def download_tile_one_band(tile_numbers, tile_fitsname, final_path, temp_path, vos_path, band):
     if os.path.exists(final_path):
-        logging.info(f'File {tile_fitsname} was already downloaded for band {band}.')
+        logger.info(f'File {tile_fitsname} was already downloaded for band {band}.')
         return True
 
     try:
-        logging.info(f'Downloading {tile_fitsname} for band {band}...')
+        logger.info(f'Downloading {tile_fitsname} for band {band}...')
         start_time = time.time()
         result = subprocess.run(
             f'vcp -v {vos_path} {temp_path}', shell=True, stderr=subprocess.PIPE, text=True
@@ -79,22 +99,22 @@ def download_tile_one_band(tile_numbers, tile_fitsname, final_path, temp_path, v
         result.check_returncode()
 
         os.rename(temp_path, final_path)
-        logging.info(f'Successfully downloaded tile {tuple(tile_numbers)} for band {band}.')
-        logging.info(f'Finished in {np.round((time.time()-start_time)/60, 3)} minutes.')
+        logger.info(f'Successfully downloaded tile {tuple(tile_numbers)} for band {band}.')
+        logger.info(f'Finished in {np.round((time.time()-start_time)/60, 3)} minutes.')
         return True
 
     except subprocess.CalledProcessError as e:
-        logging.error(f'Failed downloading tile {tuple(tile_numbers)} for band {band}.')
-        logging.error(f'Subprocess error details: {e}')
+        logger.error(f'Failed downloading tile {tuple(tile_numbers)} for band {band}.')
+        logger.error(f'Subprocess error details: {e}')
         return False
 
     except FileNotFoundError:
-        logging.error(f'Failed downloading tile {tuple(tile_numbers)} for band {band}.')
-        logging.exception(f'Tile {tuple(tile_numbers)} not available in {band}.')
+        logger.error(f'Failed downloading tile {tuple(tile_numbers)} for band {band}.')
+        logger.exception(f'Tile {tuple(tile_numbers)} not available in {band}.')
         return False
 
     except Exception as e:
-        logging.error(f'Tile {tuple(tile_numbers)} in {band}: an unexpected error occurred: {e}')
+        logger.error(f'Tile {tuple(tile_numbers)} in {band}: an unexpected error occurred: {e}')
         return False
 
 
@@ -129,9 +149,9 @@ def download_tile_all_bands(avail, tile_numbers, in_dict, download_dir):
         vos_path = os.path.join(vos_dir, tile_fitsfilename)
         # Check if the directory exists, and create it if not
         if os.path.exists(os.path.join(tile_dir, tile_fitsfilename)):
-            logging.info(f'File {tile_fitsfilename} was already downloaded.')
+            logger.info(f'File {tile_fitsfilename} was already downloaded.')
         else:
-            logging.info(f'Downloading {tile_fitsfilename}..')
+            logger.info(f'Downloading {tile_fitsfilename}..')
             try:
                 result_download = subprocess.run(
                     f'vcp -v {vos_path} {temp_path}',
@@ -141,20 +161,20 @@ def download_tile_all_bands(avail, tile_numbers, in_dict, download_dir):
                 )
                 result_download.check_returncode()
                 os.rename(temp_path, final_path)
-                logging.info(f'Tile {tuple(tile_numbers)} downloaded successfully in {band}.')
+                logger.info(f'Tile {tuple(tile_numbers)} downloaded successfully in {band}.')
 
             except subprocess.CalledProcessError as e:
-                logging.error(f'Tile {tuple(tile_numbers)} failed to download in {band}.')
-                logging.exception(f'Subprocess error details: {e}')
+                logger.error(f'Tile {tuple(tile_numbers)} failed to download in {band}.')
+                logger.exception(f'Subprocess error details: {e}')
                 return False
 
             except FileNotFoundError:
-                logging.error(f'Failed downloading tile {tuple(tile_numbers)} for band {band}.')
-                logging.exception(f'Tile {tuple(tile_numbers)} not available in {band}.')
+                logger.error(f'Failed downloading tile {tuple(tile_numbers)} for band {band}.')
+                logger.exception(f'Tile {tuple(tile_numbers)} not available in {band}.')
                 return False
 
             except Exception as e:
-                logging.exception(
+                logger.exception(
                     f'Tile {tuple(tile_numbers)} in {band}: an unexpected error occurred: {e}'
                 )
                 return False
@@ -240,7 +260,7 @@ def save_to_h5(stacked_cutout, tile_numbers, ids, ras, decs, size, avail_bands, 
         cutout_dir,
         f'{str(tile_numbers[0]).zfill(3)}_{str(tile_numbers[1]).zfill(3)}_{size}x{size}_{avail_bands}.h5',
     )
-    logging.info(f'Saving file: {save_path}')
+    logger.info(f'Saving file: {save_path}')
     dt = h5py.special_dtype(vlen=str)
     with h5py.File(save_path, 'w', libver='latest') as hf:
         hf.create_dataset('images', data=stacked_cutout.astype(np.float32))
