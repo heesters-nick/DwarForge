@@ -67,6 +67,18 @@ def tile_finder(avail, catalog, coord_c, tile_info_dir, band_constr=5):
 
 
 def tile_band_specs(tile, in_dict, band, download_dir):
+    """
+    Get the necessary information for downloading a tile in a specific band.
+
+    Args:
+        tile (tuple): tile numbers
+        in_dict (dictionary): band dictionary containing the necessary info on the file properties
+        band (str): band name
+        download_dir (str): download directory
+
+    Returns:
+        tuple: tile_fitsfilename, file_path after download complete, temp_path while download ongoing, vos_path (path to file on server), fits extension of the data, zero point
+    """
     vos_dir = in_dict[band]['vos']
     prefix = in_dict[band]['name']
     suffix = in_dict[band]['suffix']
@@ -85,6 +97,20 @@ def tile_band_specs(tile, in_dict, band, download_dir):
 
 
 def download_tile_one_band(tile_numbers, tile_fitsname, final_path, temp_path, vos_path, band):
+    """
+    Download a tile in a specific band.
+
+    Args:
+        tile_numbers (tuple): tile numbers
+        tile_fitsname (str): tile fits filename
+        final_path (str): path to file after download complete
+        temp_path (str): path to file while download ongoing
+        vos_path (str): path to file on server
+        band (str): band name
+
+    Returns:
+        bool: success/failure
+    """
     if os.path.exists(final_path):
         logger.info(f'File {tile_fitsname} was already downloaded for band {band}.')
         return True

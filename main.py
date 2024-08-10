@@ -3,17 +3,26 @@ import logging
 import multiprocessing
 import os
 import queue
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from multiprocessing import Manager
 
-from logging_stuff import setup_logging
+import psutil
+
+from logging_stuff import (
+    bytes_to_gb,
+    generate_summary_report,
+    get_total_memory_usage,
+    report_progress_and_memory,
+    setup_logging,
+)
 
 setup_logging(
     log_dir='./logs',
     script_name=__file__,
-    logging_level=logging.INFO,
+    logging_level=logging.DEBUG,
 )
 logger = logging.getLogger()
 
@@ -616,7 +625,10 @@ def input_to_tile_list(
     return unique_tiles, tiles_x_bands, catalog
 
 
-def process_tile_for_band(job_queue, in_dict, input_catalog, download_dir):
+def process_tile_for_band(job_queue, in_dict, input_catalog, download_dir, db_lock, process_ids):
+    # Register this process's PID
+    process_ids.append(os.getpid())
+
     while True:
         try:
             tile, band = job_queue.get(block=False)
@@ -624,43 +636,67 @@ def process_tile_for_band(job_queue, in_dict, input_catalog, download_dir):
             logger.error('Queue is empty.')
             break
 
-        tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp = tile_band_specs(
-            tile, in_dict, band, download_dir
-        )
-        # Download the tile in the given band
-        if download_tile_one_band(tile, tile_fitsfilename, final_path, temp_path, vos_path, band):
-            # Preprocess (bin)
-            prepped_path, prepped_header = prep_tile(final_path, fits_ext, zp, bin_size=4)
+        try:
+            update_progress(tile, band, 'started', db_lock)
 
-            # Run detection
-            param_path = run_mto(
-                file_path=prepped_path,
-                band=band,
-                with_segmap=False,
-                move_factor=0.39,
-                min_distance=0.0,
-            )
-            # Calculate photometric parameters
-            mto_det, mto_all = param_phot(
-                param_path, header=prepped_header, zp=30, mu_min=21.0, reff_min=1.4
+            start_memory = get_total_memory_usage(process_ids)
+            logger.debug(
+                f'Starting processing of tile {tile}, band {band}. Total memory: {start_memory:.2f} GB'
             )
 
-            # save filtered MTO detections
-            mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
+            tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp = tile_band_specs(
+                tile, in_dict, band, download_dir
+            )
+            # Download the tile in the given band
+            if download_tile_one_band(
+                tile, tile_fitsfilename, final_path, temp_path, vos_path, band
+            ):
+                # Preprocess (bin)
+                prepped_path, prepped_header = prep_tile(final_path, fits_ext, zp, bin_size=4)
 
-            # Match detections with catalog
-            if input_catalog is not None:
-                mto_det = add_labels(
-                    tile, band, det_df=mto_det, det_df_full=mto_all, dwarfs_df=input_catalog
+                # Run detection
+                param_path = run_mto(
+                    file_path=prepped_path,
+                    band=band,
+                    with_segmap=False,
+                    move_factor=0.39,
+                    min_distance=0.0,
+                )
+                # Calculate photometric parameters
+                mto_det, mto_all = param_phot(
+                    param_path, header=prepped_header, zp=30, mu_min=21.0, reff_min=1.4
                 )
 
-            # delete raw data
-            delete_file(param_path)
-            delete_file(prepped_path)
-            delete_file(final_path)
+                # save filtered MTO detections
+                mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
 
+                # Match detections with catalog
+                if input_catalog is not None:
+                    mto_det = add_labels(
+                        tile, band, det_df=mto_det, det_df_full=mto_all, dwarfs_df=input_catalog
+                    )
+
+                # delete raw data
+                delete_file(param_path)
+                delete_file(prepped_path)
+                delete_file(final_path)
+
+            end_memory = get_total_memory_usage(process_ids)
+            logger.debug(
+                f'Finished processing of tile {tile}, band {band}. Total memory: {end_memory:.2f} GB'
+            )
+            logger.debug(f'Memory change: {end_memory - start_memory:.2f} GB')
             # track processed tiles
-            update_progress(tile, band)
+            update_progress(tile, band, 'completed', db_lock)
+        except Exception as e:
+            error_message = f'Error processing tile {tile}, band {band}: {str(e)}'
+            logger.error(error_message)
+            update_progress(tile, band, 'failed', db_lock, error_message)
+        finally:
+            # Force garbage collection to free up memory
+            import gc
+
+            gc.collect()
 
 
 def main(
@@ -723,12 +759,23 @@ def main(
     # Initialize job queue and result queue
     manager = Manager()
     job_queue = manager.Queue()
+    db_lock = manager.Lock()
+    process_ids = manager.list()
+
+    # Add main process ID
+    process_ids.append(os.getpid())
 
     unprocessed_jobs = get_unprocessed_jobs(
         availability, process_band=anch_band, process_all_bands=process_all_avail
     )
     for job in unprocessed_jobs:
         job_queue.put(job)
+
+    # Start progress reporting thread
+    progress_thread = threading.Thread(
+        target=report_progress_and_memory, args=(process_ids,), daemon=True
+    )
+    progress_thread.start()
 
     # Determine the number of processes to use
     num_processes = os.cpu_count()
@@ -739,7 +786,7 @@ def main(
     for _ in range(num_processes):
         p = multiprocessing.Process(
             target=process_tile_for_band,
-            args=(job_queue, band_dict_incl, input_catalog, download_dir),
+            args=(job_queue, band_dict_incl, input_catalog, download_dir, db_lock, process_ids),
         )
         processes.append(p)
         p.start()
@@ -747,6 +794,21 @@ def main(
     # Wait for all processes to complete
     for p in processes:
         p.join()
+
+    # Stop the progress thread
+    progress_thread.join(timeout=1)  # Give the thread 1 second to finish
+
+    # Final memory report
+    total_memory = bytes_to_gb(psutil.virtual_memory().total)  # Total system memory in GB
+    available_memory = bytes_to_gb(psutil.virtual_memory().available)  # Available memory in GB
+    used_memory = get_total_memory_usage(process_ids)
+    logger.info(f'Total system memory: {total_memory:.2f} GB')
+    logger.info(f'Total memory used by all processes: {used_memory:.2f} GB')
+    logger.info(f'Available system memory: {available_memory:.2f} GB')
+
+    # Generate and log summary report
+    summary_report = generate_summary_report()
+    logger.info(summary_report)
 
 
 if __name__ == '__main__':
@@ -799,6 +861,8 @@ if __name__ == '__main__':
         'catalog_path': dwarf_catalog,
     }
 
+    multiprocessing.set_start_method('spawn')
+
     start = time.time()
     main(**arg_dict_main)
     end = time.time()
@@ -809,4 +873,4 @@ if __name__ == '__main__':
         elapsed_string.split(':')[1],
         elapsed_string.split(':')[2],
     )
-    print(f'Done! Execution took {hours} hours, {minutes} minutes, and {seconds} seconds.')
+    logger.info(f'Done! Execution took {hours} hours, {minutes} minutes, and {seconds} seconds.')
