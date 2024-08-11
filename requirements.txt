@@ -10,8 +10,8 @@ scikit-image
 photutils
 sep
 joblib
-black
-ruff
 h5py
 astride
 vos
+psutil
+pyarrow
