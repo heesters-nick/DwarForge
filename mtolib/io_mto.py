@@ -45,7 +45,7 @@ def read_fits_file(filename):
         hdulist.close()
 
         if img_data.dtype != np.double:
-            img_data = img_data.astype(float)
+            img_data = img_data.astype(np.float)
 
         return img_data
 

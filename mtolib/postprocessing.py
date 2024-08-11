@@ -80,8 +80,8 @@ def get_image_parameters(img, object_ids, sig_ancs, params,):
     warnings.filterwarnings('error', category=RuntimeWarning, append=True)
 
     parameters = []
-    headings = ['ID', 'x', 'y', 'A', 'B', 'theta',  # 'kurtosis',
-                           'total_flux', 'mu_max', 'mu_median', 'mu_mean', 'R_fwhm', 'R_e', 'R10', 'R90']
+    headings = ['ID', 'X', 'Y', 'A', 'B', 'theta',  # 'kurtosis',
+                           'total_flux', 'mu_max', 'mu_median', 'mu_mean', 'R_fwhm', 'R_e', 'R10', 'R90','n_pix']
 
     parameters.append(headings)
 
@@ -110,7 +110,7 @@ def get_image_parameters(img, object_ids, sig_ancs, params,):
 
 def get_object_parameters(img, node_id, pixel_indices):
     """Calculate an object's parameters given the indices of its pixels"""
-    p = [node_id]
+    p = [np.int32(node_id)]
 
     # Get pixel values for an object
     pixel_values = np.nan_to_num(img.data[pixel_indices])
@@ -134,19 +134,20 @@ def get_object_parameters(img, node_id, pixel_indices):
     second_order_moments = [*get_second_order_moments(pixel_indices, pixel_values, flux_sum, *f_o_m)]
     p.extend(second_order_moments)
 
-    p.append(flux_sum)
+    p.append(np.float32(flux_sum))
     p.extend(get_basic_stats(pixel_values))
 
     radii, half_max = get_light_distribution(pixel_values, flux_sum)
     p.append(half_max)
     p.extend(radii)
+    p.append(np.int32(len(pixel_values)))
 
     return p
 
 
 def get_basic_stats(pixel_values):
     """Return basic statistics about a pixel distribution"""
-    return np.max(pixel_values), np.median(pixel_values), np.mean(pixel_values)
+    return np.float32(np.max(pixel_values)), np.float32(np.median(pixel_values)), np.float32(np.mean(pixel_values))
 
 
 def get_first_order_moments(indices, values, flux_sum):
@@ -155,7 +156,7 @@ def get_first_order_moments(indices, values, flux_sum):
     x = np.dot(indices[1], values)/flux_sum
     y = np.dot(indices[0], values)/flux_sum
 
-    return x, y
+    return np.float32(x), np.float32(y)
 
 
 def get_second_order_moments(indices, values, flux_sum, x, y):
@@ -220,7 +221,7 @@ def get_second_order_moments(indices, values, flux_sum, x, y):
     # else:
     #     kurtosis = -99
 
-    return major_axis, minor_axis, theta
+    return np.float32(major_axis), np.float32(minor_axis), np.float32(theta)
 
 
 def get_light_distribution(pixel_values, flux_sum):
@@ -256,4 +257,4 @@ def get_light_distribution(pixel_values, flux_sum):
 
 def find_radius(area):
     """Calculate the radius of a circle of a given radius"""
-    return np.sqrt(area/np.pi)
+    return np.float32(np.sqrt(area/np.pi))
