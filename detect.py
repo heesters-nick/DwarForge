@@ -6,7 +6,8 @@ import time
 import joblib
 import numpy as np
 import pandas as pd
-import sep
+
+# import sep
 from astropy.wcs import WCS
 
 logger = logging.getLogger()
@@ -160,19 +161,17 @@ def run_mto(
         result_mto = subprocess.run(exec_str, shell=True, stderr=subprocess.PIPE, text=True)
         result_mto.check_returncode()
         logger.info(
-            f'Successfully ran MTO on tile {tile_name} for band {band}. \nFinished in  {np.round((time.time() - mto_start), 2)} seconds.'
+            f'Successfully ran MTO on tile {tile_name} for band {band} in {np.round((time.time() - mto_start), 2)} seconds.'
         )
 
     except subprocess.CalledProcessError as e:
-        logger.error(f'Tile {tile_name} failed to download in {band}.')
-        logger.error(f'Subprocess error details: {e}')
+        logger.error(f'Tile {tile_name}: MTO failed in {band}. Subprocess error details: {e}')
 
     return param_path
 
 
 def param_phot(param_path, header, zp=30.0, mu_min=19.0, reff_min=1.4):
     params_field = pd.read_csv(param_path)
-    mto_all = params_field.copy()
     params_field['ra'], params_field['dec'] = WCS(header).all_pix2world(
         params_field['X'], params_field['Y'], 0
     )
@@ -200,6 +199,7 @@ def param_phot(param_path, header, zp=30.0, mu_min=19.0, reff_min=1.4):
     params_field = params_field[~params_field.isin([np.inf, -np.inf]).any(axis=1)].reset_index(
         drop=True
     )
+    mto_all = params_field.copy()
     params_field = params_field.loc[
         (params_field['mu'] > mu_min)
         & (params_field['re_arcsec'] > reff_min)
@@ -230,9 +230,9 @@ def source_detection(image, thresh=3.0, minarea=5):
     """
     logger.info('starting sep')
     image_c = image.byteswap().newbyteorder()
-    bkg = sep.Background(image_c, maskthresh=thresh, bw=128)
+    bkg = sep.Background(image_c, maskthresh=thresh, bw=128)  # noqa: F821
     data_sub = image_c - bkg
-    objects, segmap = sep.extract(
+    objects, segmap = sep.extract(  # noqa: F821
         data_sub,
         thresh=thresh,
         err=bkg.globalrms,

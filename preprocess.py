@@ -41,7 +41,7 @@ def open_fits(file_path, fits_ext):
     """
     logger.debug(f'Opening fits file {os.path.basename(file_path)}..')
     with fits.open(file_path, memmap=True) as hdul:
-        data = hdul[fits_ext].data  # type: ignore
+        data = hdul[fits_ext].data.astype(np.float32)  # type: ignore
         header = hdul[fits_ext].header  # type: ignore
     logger.debug(f'Fits file {os.path.basename(file_path)} opened.')
     return data, header
@@ -508,8 +508,7 @@ def save_processed(data_binned, header, file_path, bin_size, preprocess_type, up
         new_header = header.copy()
 
     # Create a new HDU with the rebinned data and updated header
-    new_hdu = fits.PrimaryHDU(data=data_binned, header=new_header)
-
+    new_hdu = fits.PrimaryHDU(data=data_binned.astype(np.float32), header=new_header)
     # save new fits file
     new_hdu.writeto(out_path, overwrite=True)
 

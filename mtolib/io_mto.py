@@ -1,28 +1,30 @@
 """Input/output functions."""
 
-from astropy.io import fits
-import sys
-import numpy as np
 import argparse
-from . import utils, postprocessing
-from PIL import Image
 import csv
+import sys
 import warnings
+
+import numpy as np
+from astropy.io import fits
 from astropy.utils.exceptions import AstropyDeprecationWarning
+from PIL import Image
+
+from . import postprocessing, utils
 
 
 def get_file_extension(filename):
     """Get the extension part of a given filename."""
 
-    if "." in filename:
-        return filename.split(".")[-1]
+    if '.' in filename:
+        return filename.split('.')[-1]
     else:
         return None
 
 
 def read_fits_file(filename):
     """Open a .fits file.
-       Return the first data frame as a numpy array.
+    Return the first data frame as a numpy array.
     """
 
     # Open the file
@@ -34,23 +36,23 @@ def read_fits_file(filename):
         while img_data is None:
             # Extract image data from file and close
             try:
-                img_data = hdulist[hdu_index].data
+                img_data = hdulist[hdu_index].data.astype(np.float32)
                 hdu_index += 1
 
             except IndexError:
-                print("Could not find image data in file.")
+                print('Could not find image data in file.')
                 hdulist.close()
                 sys.exit(1)
 
         hdulist.close()
 
         if img_data.dtype != np.double:
-            img_data = img_data.astype(np.float)
+            img_data = img_data.astype(np.float32)
 
         return img_data
 
     except IOError:
-        print("Could not read file:", filename)
+        print('Could not read file:', filename)
         sys.exit(1)
 
 
@@ -64,9 +66,9 @@ def get_fits_header(filename):
         return header
 
     except IOError:
-        print("Could not read file:", filename)
-    except:
-        print("Could not read header")
+        print('Could not read file:', filename)
+    except:  # noqa: E722
+        print('Could not read header')
     finally:
         # Create an empty header if one could not be found
         header = fits.Header()
@@ -93,8 +95,7 @@ def write_fits_file(data, header=None, filename='out.fits'):
     hdulist.close()
 
 
-def generate_image(img, object_ids, p,
-                   levelled=False):
+def generate_image(img, object_ids, p, levelled=False):
     """Save an image in .png or .fits format.
 
     The 'levelled' parameter generates an extra fits dataframe where objects are shown at their
@@ -102,7 +103,7 @@ def generate_image(img, object_ids, p,
     """
 
     if p.verbosity:
-        print("\n---Generating segmentation map---")
+        print('\n---Generating segmentation map---')
 
     extension = get_file_extension(p.out)
 
@@ -111,7 +112,7 @@ def generate_image(img, object_ids, p,
     if levelled:
         data.append(postprocessing.levelled_segments(img, object_ids))
 
-    if extension == "fits":
+    if extension == 'fits':
         if p.filename is not None:
             # Get original header
             header = get_fits_header(p.filename)
@@ -126,14 +127,14 @@ def generate_image(img, object_ids, p,
         Image.fromarray(np.flipud(output)).save(p.out)
 
     if p.verbosity:
-        print("Saved output to", p.out)
+        print('Saved output to', p.out)
 
 
 def generate_parameters(img, object_ids, sig_ancs, p):
     """Write detected object parameters into a csv file"""
 
     if p.verbosity:
-        print("\n---Calculating parameters---")
+        print('\n---Calculating parameters---')
 
     object_ids = object_ids.ravel()
 
@@ -147,7 +148,7 @@ def generate_parameters(img, object_ids, sig_ancs, p):
         param_writer.writerows(postprocessing.get_image_parameters(img, object_ids, sig_ancs, p))
 
     if p.verbosity:
-        print("Saved parameters to", p.par_out)
+        print('Saved parameters to', p.par_out)
 
 
 # TODO move?
@@ -155,17 +156,36 @@ def make_parser():
     """Create an argument parser for MTObjects."""
     parser = argparse.ArgumentParser(description='Find objects in a fits file')
     parser.add_argument('filename', type=str, help='Location of input .fits file')
-    parser.add_argument('-out', type=str, help='Location to save filtered image. '
-                                               'Supports .fits and .png filenames', default='out.png')
-    parser.add_argument('-par_out', type=str, help='Location to save output parameters (csv format).', default='parameters.csv')
+    parser.add_argument(
+        '-out',
+        type=str,
+        help='Location to save filtered image. ' 'Supports .fits and .png filenames',
+        default='out.png',
+    )
+    parser.add_argument(
+        '-par_out',
+        type=str,
+        help='Location to save output parameters (csv format).',
+        default='parameters.csv',
+    )
     parser.add_argument('-soft_bias', type=float, help='Constant to subtract', default=None)
     parser.add_argument('-gain', type=float, help='Gain in electrons per ADU', default=-1)
     parser.add_argument('-bg_mean', type=float, help='Mean background', default=None)
     parser.add_argument('-bg_variance', type=float, help='Background variance', default=-1)
-    parser.add_argument('-alpha', type=utils.validate_decimal, help='significance level', default=1e-6)
-    parser.add_argument('-move_factor', type=utils.validate_positive, help='Moves up the object marker', default=0.5)
-    parser.add_argument('-min_distance', type=utils.validate_positive,
-                         help='Minimum brightness distance between objects', default=0.0)
-    parser.add_argument('-verbosity', type=int, help='Verbosity level (0-2)', choices=range(0, 3), default=0)
+    parser.add_argument(
+        '-alpha', type=utils.validate_decimal, help='significance level', default=1e-6
+    )
+    parser.add_argument(
+        '-move_factor', type=utils.validate_positive, help='Moves up the object marker', default=0.5
+    )
+    parser.add_argument(
+        '-min_distance',
+        type=utils.validate_positive,
+        help='Minimum brightness distance between objects',
+        default=0.0,
+    )
+    parser.add_argument(
+        '-verbosity', type=int, help='Verbosity level (0-2)', choices=range(0, 3), default=0
+    )
 
     return parser

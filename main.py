@@ -1,29 +1,29 @@
 import argparse
+import gc
 import logging
 import multiprocessing
 import os
 import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+import warnings
 from datetime import timedelta
 from multiprocessing import Manager
 
 import psutil
 
-from logging_stuff import (
-    bytes_to_gb,
+from logging_setup import (
     generate_summary_report,
-    get_total_memory_usage,
     report_progress_and_memory,
-    setup_logging,
+    setup_logger,
 )
 
-setup_logging(
+logger = setup_logger(
     log_dir='./logs',
-    script_name=__file__,
-    logging_level=logging.DEBUG,
+    name='dwarforge',
+    logging_level=logging.INFO,
 )
+
 logger = logging.getLogger()
 
 import numpy as np  # noqa: E402
@@ -31,25 +31,37 @@ import pandas as pd  # noqa: E402
 from astropy.coordinates import SkyCoord  # noqa: E402
 from vos import Client  # noqa: E402
 
-from detect import param_phot, run_mto, run_mto_old  # noqa: E402
+from detect import param_phot, run_mto  # noqa: E402
 from kd_tree import build_tree  # noqa: E402
-from postprocess import add_labels, match_detections_with_catalogs  # noqa: E402
+from postprocess import add_labels  # noqa: E402
 from preprocess import prep_tile  # noqa: E402
+from shutdown import GracefulKiller  # noqa: E402
 from tile_cutter import (  # noqa: E402
-    download_tile_all_bands,
     download_tile_one_band,
-    make_cutouts_all_bands,
-    save_to_h5,
     tile_band_specs,
     tile_finder,
 )
-from track_progress import get_unprocessed_jobs, init_db, update_progress  # noqa: E402
+from track_progress import (  # noqa: E402
+    MemoryTracker,
+    get_unprocessed_jobs,
+    init_db,
+    update_tile_info,
+)
 from utils import (  # noqa: E402
     TileAvailability,
     delete_file,
     extract_tile_numbers,
     load_available_tiles,
+    tile_str,
     update_available_tiles,
+)
+
+warnings.filterwarnings('ignore', message="'datfix' made the change", append=True)
+warnings.filterwarnings(
+    'ignore', category=RuntimeWarning, message='invalid value encountered in log10'
+)
+warnings.filterwarnings(
+    'ignore', category=RuntimeWarning, message='divide by zero encountered in log10'
 )
 
 client = Client()
@@ -134,9 +146,9 @@ band_dict_incl = {key: band_dictionary.get(key) for key in considered_bands}
 
 ### pipeline options ###
 
-create_cutouts = True
+create_cutouts = False
 # plot cutouts?
-plot = True
+plot = False
 # Plot a random cutout from one of the tiles after execution else plot all cutouts
 plot_random_cutout = False
 # Show plot
@@ -156,7 +168,7 @@ reff_limit = 1.6
 
 
 # retrieve from the VOSpace and update the currently available tiles; takes some time to run
-update_tiles = True
+update_tiles = False
 # build kd tree with updated tiles otherwise use the already saved tree
 if update_tiles:
     build_new_kdtree = True
@@ -171,10 +183,14 @@ band_constraint = 1
 # print per tile availability
 print_per_tile_availability = False
 
+### Multiprocessing constants
+NUM_CORES = psutil.cpu_count(logical=False)  # Number of physical cores
+PREFETCH_FACTOR = 2  # Number of prefetched tiles per core
+
 ### paths ###
 platform = 'CANFAR'  #'CANFAR' #'Narval'
 if platform == 'CANFAR':
-    root_dir_main = '/arc/home/heestersnick/tileslicer'
+    root_dir_main = '/arc/home/heestersnick/dwarforge'
     root_dir_data = '/arc/projects/unions'
     unions_detection_directory = os.path.join(
         root_dir_data, 'catalogues/unions/GAaP_photometry/UNIONS2000'
@@ -182,7 +198,7 @@ if platform == 'CANFAR':
     redshift_class_catalog = os.path.join(
         root_dir_data, 'catalogues/redshifts/redshifts-2024-05-07.parquet'
     )
-    download_directory = os.path.join(root_dir_data, 'ssl/data/raw/tiles/tiles2024')
+    download_directory = os.path.join(root_dir_data, 'ssl/data/raw/tiles/dwarforge')
     cutout_directory = os.path.join(root_dir_main, 'cutouts')
     os.makedirs(cutout_directory, exist_ok=True)
 
@@ -366,207 +382,6 @@ def import_tiles(tiles, availability, band_constr):
     ]
 
 
-def process_tiles_parallel(
-    avail,
-    in_dict,
-    tile_nums_list,
-    download_dir,
-    cutout_dir,
-    table_dir,
-    model_dir,
-    mto_path,
-    band,
-    with_download,
-    with_detection,
-    with_cat_match,
-    with_cutouts,
-    size,
-    zp,
-    mu_lim,
-    reff_lim,
-    id_key,
-    ra_key,
-    dec_key,
-    in_cat,
-    with_streak_mask,
-):
-    """
-    Process tiles in parallel.
-
-    Args:
-        avail (TileAvailability): instance of TileAvailability
-        in_dict (dictionary): band dictionary
-        tile_nums_list (list): list of tile numbers
-        download_dir (str): download directory
-        cutout_dir (str): cutout directory
-        table_dir (str): table directory
-        model_dir (str): model directory
-        mto_path (str): path to mto.py
-        band (str): the band we use for object detection
-        with_download (bool): download the tiles
-        with_detection (bool): detect objects in the tiles
-        with_cat_match (bool): match detected objects with known objects
-        with_cutouts (bool): produce cutouts of the detected objects
-        size (int): square size of the cutouts in pixels
-        zp (float): photometric zero point of the band we use for detection
-        mu_lim (float): minimum surface brightness for object selection
-        reff_lim (float): minimum effective radius for object selection
-        id_key (str): ID key in the dataframe
-        ra_key (str): right ascension key in the dataframe
-        dec_key (str): declination key in the dataframe
-        in_cat (dataframe): input catalog
-        with_streak_mask (bool): mask streaks
-    """
-    with ThreadPoolExecutor() as executor:
-        # Create a list of futures for concurrent downloads
-        futures = []
-        for tile_nums in tile_nums_list:
-            future = executor.submit(
-                complete_tile_processing_workflow,
-                avail,
-                in_dict,
-                tile_nums,
-                download_dir,
-                cutout_dir,
-                table_dir,
-                model_dir,
-                mto_path,
-                band,
-                with_download,
-                with_detection,
-                with_cat_match,
-                with_cutouts,
-                size,
-                zp,
-                mu_lim,
-                reff_lim,
-                id_key,
-                ra_key,
-                dec_key,
-                in_cat,
-                with_streak_mask,
-            )
-            futures.append(future)
-
-        # Wait for all downloads to complete
-        for future in futures:
-            future.result()
-
-
-def complete_tile_processing_workflow(
-    avail,
-    in_dict,
-    tile_nums,
-    download_dir,
-    cutout_dir,
-    table_dir,
-    model_dir,
-    mto_path,
-    band,
-    with_download,
-    with_detection,
-    with_cat_match,
-    with_cutouts,
-    size,
-    zp,
-    mu_lim,
-    reff_lim,
-    id_key,
-    ra_key,
-    dec_key,
-    in_cat,
-    with_streak_mask,
-):
-    """
-    Process a single tile.
-
-    Args:
-        avail (TileAvailability): instance of TileAvailability
-        in_dict (dictionary): band dictionary
-        tile_nums (tuple): tile numbers
-        download_dir (str): download directory
-        cutout_dir (str): cutout directory
-        table_dir (str): table directory
-        model_dir (str): model directory
-        mto_path (str): path to mto.py
-        band (str): the band we use for object detection
-        with_download (bool): download the tiles
-        with_detection (bool): detect objects in the tiles
-        with_cat_match (bool): match detected objects with known objects
-        with_cutouts (bool): produce cutouts of the detected objects
-        size (int): square size of the cutouts in pixels
-        zp (float): photometric zero point of the band we use for detection
-        mu_lim (float): minimum surface brightness for object selection
-        reff_lim (float): minimum effective radius for object selection
-        id_key (str): ID key in the dataframe
-        ra_key (str): right ascension key in the dataframe
-        dec_key (str): declination key in the dataframe
-        in_cat (dataframe): input catalog
-        with_streak_mask (bool): mask streaks
-    """
-    vos_dir = in_dict[band]['vos']
-    prefix = in_dict[band]['name']
-    suffix = in_dict[band]['suffix']
-    delimiter = in_dict[band]['delimiter']
-    fits_ext = in_dict[band]['fits_ext']
-    zfill = in_dict[band]['zfill']
-    zp = in_dict[band]['zp']
-    tile_dir = download_dir + f'{str(tile_nums[0]).zfill(3)}_{str(tile_nums[1]).zfill(3)}'
-    os.makedirs(tile_dir, exist_ok=True)
-    tile_fitsfilename = f'{prefix}{delimiter}{str(tile_nums[0]).zfill(zfill)}{delimiter}{str(tile_nums[1]).zfill(zfill)}{suffix}'
-    temp_name = '.'.join(tile_fitsfilename.split('.')[:-1]) + '_temp.fits'
-    temp_path = os.path.join(tile_dir, temp_name)
-    final_path = os.path.join(tile_dir, tile_fitsfilename)
-    vos_path = os.path.join(vos_dir, tile_fitsfilename)
-    obj_to_cut = None
-    avail_bands = ''.join(avail.get_availability(tile_nums)[0])
-
-    if with_download:
-        download_tile_one_band(tile_nums, tile_fitsfilename, final_path, temp_path, vos_path, band)
-    else:
-        logging.info('Skipping download.')
-
-    if with_detection:
-        bkg, header = prep_tile(final_path, fits_ext, zp)
-        params_mto = run_mto_old(
-            tile_nums, final_path, model_dir, mto_path, band, mu_lim, reff_lim, bkg, zp, header
-        )
-
-        if with_cat_match:
-            if np.count_nonzero(params_mto['label'].values == 1) > 0:  # type: ignore
-                obj_to_cut = match_detections_with_catalogs(tile_nums, params_mto, table_dir)
-            else:
-                logging.info('No detections found. Skipping catalog matching.')
-
-        else:
-            logging.info('Skipping catalog matching.')
-            obj_to_cut = params_mto.loc[params_mto['label'] == 1].reset_index(drop=True)  # type: ignore
-
-    if with_cutouts:
-        if in_cat is not None:
-            obj_to_cut = in_cat
-        if obj_to_cut is not None:
-            if download_tile_all_bands(avail, tile_nums, in_dict, download_dir):
-                logging.info('Successfully downloaded the remaining bands.')
-                cutout = make_cutouts_all_bands(
-                    avail, tile_nums, obj_to_cut, download_dir, in_dict, size
-                )
-                save_to_h5(
-                    cutout,
-                    tile_nums,
-                    obj_to_cut[id_key].values,
-                    obj_to_cut[ra_key].values,
-                    obj_to_cut[dec_key].values,
-                    size,
-                    avail_bands,
-                    cutout_dir,
-                )
-        else:
-            logging.info('Skipping download and cutout, no objects to cut out.')
-    else:
-        logging.info('No tiles were harmed while running this script.')
-
-
 def input_to_tile_list(
     availability,
     band_constr,
@@ -625,78 +440,141 @@ def input_to_tile_list(
     return unique_tiles, tiles_x_bands, catalog
 
 
-def process_tile_for_band(job_queue, in_dict, input_catalog, download_dir, db_lock, process_ids):
-    # Register this process's PID
-    process_ids.append(os.getpid())
-
-    while True:
-        try:
-            tile, band = job_queue.get(block=False)
-        except queue.Empty:
-            logger.error('Queue is empty.')
+def download_worker(
+    download_queue, ready_queue, in_dict, download_dir, db_lock, shutdown_flag, queue_lock
+):
+    while not shutdown_flag.is_set():
+        tile, band = download_queue.get(timeout=1)
+        if tile is None:  # Sentinel value to indicate end of downloads
             break
 
+        tile_info = {
+            'tile': tile,
+            'band': band,
+            'start_time': time.time(),
+            'status': 'downloading',
+        }
+        update_tile_info(tile_info, db_lock)
+
         try:
-            update_progress(tile, band, 'started', db_lock)
-
-            start_memory = get_total_memory_usage(process_ids)
-            logger.debug(
-                f'Starting processing of tile {tile}, band {band}. Total memory: {start_memory:.2f} GB'
-            )
-
             tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp = tile_band_specs(
                 tile, in_dict, band, download_dir
             )
-            # Download the tile in the given band
-            if download_tile_one_band(
+            success = download_tile_one_band(
                 tile, tile_fitsfilename, final_path, temp_path, vos_path, band
-            ):
-                # Preprocess (bin)
-                prepped_path, prepped_header = prep_tile(final_path, fits_ext, zp, bin_size=4)
-
-                # Run detection
-                param_path = run_mto(
-                    file_path=prepped_path,
-                    band=band,
-                    with_segmap=False,
-                    move_factor=0.39,
-                    min_distance=0.0,
-                )
-                # Calculate photometric parameters
-                mto_det, mto_all = param_phot(
-                    param_path, header=prepped_header, zp=30, mu_min=21.0, reff_min=1.4
-                )
-
-                # save filtered MTO detections
-                mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
-
-                # Match detections with catalog
-                if input_catalog is not None:
-                    mto_det = add_labels(
-                        tile, band, det_df=mto_det, det_df_full=mto_all, dwarfs_df=input_catalog
-                    )
-
-                # delete raw data
-                delete_file(param_path)
-                delete_file(prepped_path)
-                delete_file(final_path)
-
-            end_memory = get_total_memory_usage(process_ids)
-            logger.debug(
-                f'Finished processing of tile {tile}, band {band}. Total memory: {end_memory:.2f} GB'
             )
-            logger.debug(f'Memory change: {end_memory - start_memory:.2f} GB')
-            # track processed tiles
-            update_progress(tile, band, 'completed', db_lock)
+            if success:
+                ready_queue.put((tile, band, final_path, fits_ext, zp))
+                tile_info['status'] = 'ready_for_processing'
+            else:
+                tile_info['status'] = 'download_failed'
         except Exception as e:
-            error_message = f'Error processing tile {tile}, band {band}: {str(e)}'
-            logger.error(error_message)
-            update_progress(tile, band, 'failed', db_lock, error_message)
+            tile_info['status'] = 'download_failed'
+            tile_info['error_message'] = str(e)
         finally:
-            # Force garbage collection to free up memory
-            import gc
+            tile_info['end_time'] = time.time()
+            update_tile_info(tile_info, db_lock)
+            download_queue.task_done()
+
+
+def process_tile_for_band(
+    process_queue,
+    in_dict,
+    input_catalog,
+    download_dir,
+    db_lock,
+    all_downloads_complete,
+    shutdown_flag,
+    queue_lock,
+):
+    while (
+        not (all_downloads_complete.is_set() and process_queue.empty())
+        and not shutdown_flag.is_set()
+    ):
+        try:
+            tile, band, final_path, fits_ext, zp = process_queue.get(
+                timeout=120
+            )  # 2 minute timeout
+        except queue.Empty:
+            logger.error('Process queue is empty.')
+            continue
+
+        tile_info = {
+            'tile': tile,
+            'band': band,
+            'start_time': time.time(),
+            'status': 'processing',
+            'error_message': None,
+            'detection_count': 0,
+            'known_dwarfs_count': 0,
+            'matched_dwarfs_count': 0,
+            'unmatched_dwarfs_count': 0,
+        }
+
+        update_tile_info(tile_info, db_lock)
+        logger.info(f'Started processing tile {tile_str(tile)}, band {band}.')
+
+        try:
+            # Preprocess (bin)
+            prepped_path, prepped_header = prep_tile(final_path, fits_ext, zp, bin_size=4)
+
+            # Run detection
+            param_path = run_mto(
+                file_path=prepped_path,
+                band=band,
+                with_segmap=True,
+                move_factor=0.39,
+                min_distance=0.0,
+            )
+            # Calculate photometric parameters
+            mto_det, mto_all = param_phot(
+                param_path, header=prepped_header, zp=zp, mu_min=21.0, reff_min=1.4
+            )
+
+            # save filtered MTO detections
+            mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
+
+            # Match detections with catalog
+            if input_catalog is not None:
+                mto_det, matching_stats = add_labels(
+                    tile, band, det_df=mto_det, det_df_full=mto_all, dwarfs_df=input_catalog
+                )
+                tile_info.update(matching_stats)
+
+            tile_info['detection_count'] = len(mto_det)
+
+            # delete raw data
+            delete_file(param_path)
+            delete_file(prepped_path)
+            delete_file(final_path)
+
+            tile_info['status'] = 'completed'
+
+        except Exception as e:
+            tile_info['status'] = 'failed'
+            tile_info['error_message'] = str(e)
+            logger.error(f'Error processing tile {tile_str(tile)}, band {band}: {str(e)}')
+        finally:
+            tile_info['end_time'] = time.time()
+
+            update_tile_info(tile_info, db_lock)
+
+            logger.info(
+                f'Finished processing of tile {tile_str(tile)}, band {band}. '
+                f'Status: {tile_info["status"]}, '
+                f'Detections: {tile_info["detection_count"]}, '
+            )
 
             gc.collect()
+
+            # Mark the task as done in the queue
+            process_queue.task_done()
+
+        if shutdown_flag.is_set():
+            logger.info(f'Process {os.getpid()} received shutdown signal. Exiting.')
+            break
+
+    logger.info(f'Process {os.getpid()} exiting. All tasks completed or shutdown requested.')
 
 
 def main(
@@ -720,95 +598,195 @@ def main(
     anch_band,
     process_all_avail,
     catalog_path,
+    num_processing_cores,
+    mem_track_inter,
+    mem_aggr_period,
 ):
+    # Initialize the database for progress tracking
     init_db()
-    # query availability of the tiles
-    availability, all_tiles = query_availability(
-        update, band_dict, at_least, show_tile_stats, build_kdtree, tile_info_dir
-    )
 
-    # read the input catalog
-    try:
-        input_catalog = pd.read_csv(catalog_path)
-    except FileNotFoundError:
-        logger.error(f'File not found: {catalog_path}')
-        raise FileNotFoundError
-
-    # get the list of tiles for which r and at least two more bands are available
-    _, tiles_x_bands, _ = input_to_tile_list(
-        availability,
-        band_constr,
-        coordinates,
-        dataframe_path,
-        tiles,
-        ra_key,
-        dec_key,
-        id_key,
-        tile_info_dir,
-        ra_key_default,
-        dec_key_default,
-        id_key_default,
-    )
-
-    if tiles_x_bands is not None:
-        selected_all_tiles = [
-            [tile for tile in band_tiles if tile in tiles_x_bands] for band_tiles in all_tiles
-        ]
-        availability = TileAvailability(selected_all_tiles, band_dict_incl, at_least_key)
-
+    # Initialize shutdown manager
+    killer = GracefulKiller()
     # Initialize job queue and result queue
     manager = Manager()
-    job_queue = manager.Queue()
+    shutdown_flag = manager.Event()
+    download_queue = manager.Queue()
+    process_queue = manager.Queue(maxsize=num_processing_cores * PREFETCH_FACTOR)
     db_lock = manager.Lock()
+    queue_lock = manager.Lock()
     process_ids = manager.list()
 
     # Add main process ID
     process_ids.append(os.getpid())
 
-    unprocessed_jobs = get_unprocessed_jobs(
-        availability, process_band=anch_band, process_all_bands=process_all_avail
+    # Initialize MemoryTracker
+    memory_tracker = MemoryTracker(
+        process_ids, interval=mem_track_inter, aggregation_period=mem_aggr_period
     )
-    for job in unprocessed_jobs:
-        job_queue.put(job)
+    memory_tracker.start()
 
-    # Start progress reporting thread
-    progress_thread = threading.Thread(
-        target=report_progress_and_memory, args=(process_ids,), daemon=True
-    )
-    progress_thread.start()
-
-    # Determine the number of processes to use
-    num_processes = os.cpu_count()
-    assert num_processes is not None
-    logger.info(f'Using {num_processes} CPUs.')
-    # Start worker processes
-    processes = []
-    for _ in range(num_processes):
-        p = multiprocessing.Process(
-            target=process_tile_for_band,
-            args=(job_queue, band_dict_incl, input_catalog, download_dir, db_lock, process_ids),
+    try:
+        # query availability of the tiles
+        availability, all_tiles = query_availability(
+            update, band_dict, at_least, show_tile_stats, build_kdtree, tile_info_dir
         )
-        processes.append(p)
-        p.start()
 
-    # Wait for all processes to complete
-    for p in processes:
-        p.join()
+        # read the input catalog
+        try:
+            input_catalog = pd.read_csv(catalog_path)
+        except FileNotFoundError:
+            logger.error(f'File not found: {catalog_path}')
+            raise FileNotFoundError
 
-    # Stop the progress thread
-    progress_thread.join(timeout=1)  # Give the thread 1 second to finish
+        # get the list of tiles for which r and at least two more bands are available
+        _, tiles_x_bands, _ = input_to_tile_list(
+            availability,
+            band_constr,
+            coordinates,
+            dataframe_path,
+            tiles,
+            ra_key,
+            dec_key,
+            id_key,
+            tile_info_dir,
+            ra_key_default,
+            dec_key_default,
+            id_key_default,
+        )
 
-    # Final memory report
-    total_memory = bytes_to_gb(psutil.virtual_memory().total)  # Total system memory in GB
-    available_memory = bytes_to_gb(psutil.virtual_memory().available)  # Available memory in GB
-    used_memory = get_total_memory_usage(process_ids)
-    logger.info(f'Total system memory: {total_memory:.2f} GB')
-    logger.info(f'Total memory used by all processes: {used_memory:.2f} GB')
-    logger.info(f'Available system memory: {available_memory:.2f} GB')
+        if tiles_x_bands is not None:
+            selected_all_tiles = [
+                [tile for tile in band_tiles if tile in tiles_x_bands] for band_tiles in all_tiles
+            ]
+            availability = TileAvailability(selected_all_tiles, band_dict_incl, at_least_key)
 
-    # Generate and log summary report
-    summary_report = generate_summary_report()
-    logger.info(summary_report)
+        unprocessed_jobs = get_unprocessed_jobs(
+            availability, process_band=anch_band, process_all_bands=process_all_avail
+        )
+        logger.info(f'Number of unprocessed jobs: {len(unprocessed_jobs)}')
+        for job in unprocessed_jobs:
+            logger.debug(f'Job: {job}')
+            download_queue.put(job)
+
+        # Create an event to signal when all downloads are complete
+        all_downloads_complete = multiprocessing.Event()
+
+        # Start download threads
+        num_download_threads = num_processing_cores  # Adjust as needed
+        download_threads = []
+        for _ in range(num_download_threads):
+            t = threading.Thread(
+                target=download_worker,
+                args=(
+                    download_queue,
+                    process_queue,
+                    band_dict,
+                    download_dir,
+                    db_lock,
+                    shutdown_flag,
+                    queue_lock,
+                ),
+            )
+            t.daemon = True
+            t.start()
+            download_threads.append(t)
+
+        # Start progress reporting thread
+        progress_thread = threading.Thread(
+            target=report_progress_and_memory, args=(process_ids,), daemon=True
+        )
+        progress_thread.start()
+
+        logger.info(f'Using {num_processing_cores} CPUs for processing and 1 for downloading.')
+        logger.info(
+            f'There are {psutil.cpu_count(logical=False)} physical cores available in total.'
+        )
+
+        # Start worker processes
+        processes = []
+        for _ in range(num_processing_cores):
+            p = multiprocessing.Process(
+                target=process_tile_for_band,
+                args=(
+                    process_queue,
+                    band_dict,
+                    input_catalog,
+                    download_dir,
+                    db_lock,
+                    all_downloads_complete,
+                    shutdown_flag,
+                    queue_lock,
+                ),
+            )
+            p.start()
+            processes.append(p)
+            process_ids.append(p.pid)  # Add worker process ID
+
+        # Wait for downloads to complete or for shutdown signal
+        while not download_queue.empty() and not killer.kill_now and not shutdown_flag.is_set():
+            time.sleep(1)
+
+        if killer.kill_now or shutdown_flag.is_set():
+            logger.info('Initiating graceful shutdown...')
+            shutdown_flag.set()
+        else:
+            logger.info('All downloads completed. Processing continues.')
+
+        # Signal that all downloads are complete
+        all_downloads_complete.set()
+
+        # Add sentinel values to signal the end of downloads
+        for _ in range(num_download_threads):
+            download_queue.put((None, None))
+
+        for t in download_threads:
+            t.join(timeout=10)
+
+        # Wait for processing to complete or for a shutdown signal
+        while not process_queue.empty() and not killer.kill_now and not shutdown_flag.is_set():
+            time.sleep(1)
+
+        if killer.kill_now or shutdown_flag.is_set():
+            logger.info('Initiating graceful shutdown of processing...')
+            shutdown_flag.set()
+
+        # Stop worker processes
+        for p in processes:
+            p.join(timeout=60)  # Give each process 60 seconds to finish
+
+        # If any processes are still running, terminate them
+        for p in processes:
+            if p.is_alive():
+                logger.warning(
+                    f'Process {p.pid} did not terminate gracefully. Forcing termination.'
+                )
+                p.terminate()
+                p.join()
+
+        # Stop the progress thread
+        progress_thread.join(timeout=1)  # Give the thread 1 second to finish
+
+    except Exception as e:
+        logger.error(f'An error occurred in the main process: {str(e)}')
+        shutdown_flag.set()  # Signal all processes to shut down
+    finally:
+        # Stop the memory tracker
+        memory_tracker.stop()
+
+        # Get and log the memory usage statistics
+        peak_memory, mean_memory, std_memory, runtime_hours = memory_tracker.get_memory_stats()
+
+        if peak_memory is not None:
+            logger.info(f'Total runtime: {runtime_hours:.2f} hours')
+            logger.info(f'Peak total memory usage: {peak_memory:.2f} GB')
+            logger.info(f'Mean total memory usage: {mean_memory:.2f} GB')
+            logger.info(f'Standard deviation of total memory usage: {std_memory:.2f} GB')
+        else:
+            logger.warning('No memory usage data was collected.')
+
+        # Generate and log summary report
+        summary_report = generate_summary_report()
+        logger.info(summary_report)
 
 
 if __name__ == '__main__':
@@ -833,6 +811,24 @@ if __name__ == '__main__':
         action='append',
         metavar=('tile'),
         help='list of tiles to make cutouts from',
+    )
+    parser.add_argument(
+        '--processing_cores',
+        type=int,
+        default=3,
+        help='Number of cores to use for processing (default: 3)',
+    )
+    parser.add_argument(
+        '--memory_tracking_interval',
+        type=int,
+        default=60,
+        help='Interval in seconds between memory usage measurements (default: 60)',
+    )
+    parser.add_argument(
+        '--memory_aggregation_period',
+        type=int,
+        default=3600,
+        help='Period in seconds for aggregating memory statistics (default: 3600)',
     )
     args = parser.parse_args()
 
@@ -859,6 +855,9 @@ if __name__ == '__main__':
         'anch_band': anchor_band,
         'process_all_avail': process_all_available,
         'catalog_path': dwarf_catalog,
+        'num_processing_cores': args.processing_cores,
+        'mem_track_inter': args.memory_tracking_interval,
+        'mem_aggr_period': args.memory_aggregation_period,
     }
 
     multiprocessing.set_start_method('spawn')
@@ -869,8 +868,10 @@ if __name__ == '__main__':
     elapsed = end - start
     elapsed_string = str(timedelta(seconds=elapsed))
     hours, minutes, seconds = (
-        elapsed_string.split(':')[0],
-        elapsed_string.split(':')[1],
-        elapsed_string.split(':')[2],
+        np.float32(elapsed_string.split(':')[0]),
+        np.float32(elapsed_string.split(':')[1]),
+        np.float32(elapsed_string.split(':')[2]),
     )
-    logger.info(f'Done! Execution took {hours} hours, {minutes} minutes, and {seconds} seconds.')
+    logger.info(
+        f'Done! Execution took {hours} hours, {minutes} minutes, and {seconds:.2f} seconds.'
+    )

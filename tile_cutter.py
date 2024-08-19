@@ -10,6 +10,7 @@ from astropy.nddata import Cutout2D
 from astropy.wcs.utils import skycoord_to_pixel
 
 from kd_tree import TileWCS, query_tree, relate_coord_tile
+from utils import tile_str
 
 logger = logging.getLogger()
 
@@ -88,10 +89,12 @@ def tile_band_specs(tile, in_dict, band, download_dir):
     zp = in_dict[band]['zp']
     tile_dir = os.path.join(download_dir, f'{str(tile[0]).zfill(3)}_{str(tile[1]).zfill(3)}')
     os.makedirs(tile_dir, exist_ok=True)
+    tile_band_dir = os.path.join(tile_dir, band)
+    os.makedirs(tile_band_dir, exist_ok=True)
     tile_fitsfilename = f'{prefix}{delimiter}{str(tile[0]).zfill(zfill)}{delimiter}{str(tile[1]).zfill(zfill)}{suffix}'
     temp_name = '.'.join(tile_fitsfilename.split('.')[:-1]) + '_temp.fits'
-    temp_path = os.path.join(tile_dir, temp_name)
-    final_path = os.path.join(tile_dir, tile_fitsfilename)
+    temp_path = os.path.join(tile_band_dir, temp_name)
+    final_path = os.path.join(tile_band_dir, tile_fitsfilename)
     vos_path = os.path.join(vos_dir, tile_fitsfilename)
     return tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp
 
@@ -125,22 +128,23 @@ def download_tile_one_band(tile_numbers, tile_fitsname, final_path, temp_path, v
         result.check_returncode()
 
         os.rename(temp_path, final_path)
-        logger.info(f'Successfully downloaded tile {tuple(tile_numbers)} for band {band}.')
-        logger.info(f'Finished in {np.round((time.time()-start_time)/60, 3)} minutes.')
+        logger.info(
+            f'Successfully downloaded tile {tile_str(tile_numbers)} for band {band} in {np.round(time.time()-start_time, 1)} seconds.'
+        )
         return True
 
     except subprocess.CalledProcessError as e:
-        logger.error(f'Failed downloading tile {tuple(tile_numbers)} for band {band}.')
+        logger.error(f'Failed downloading tile {tile_str(tile_numbers)} for band {band}.')
         logger.error(f'Subprocess error details: {e}')
         return False
 
     except FileNotFoundError:
-        logger.error(f'Failed downloading tile {tuple(tile_numbers)} for band {band}.')
-        logger.exception(f'Tile {tuple(tile_numbers)} not available in {band}.')
+        logger.error(f'Failed downloading tile {tile_str(tile_numbers)} for band {band}.')
+        logger.exception(f'Tile {tile_str(tile_numbers)} not available in {band}.')
         return False
 
     except Exception as e:
-        logger.error(f'Tile {tuple(tile_numbers)} in {band}: an unexpected error occurred: {e}')
+        logger.error(f'Tile {tile_str(tile_numbers)} in {band}: an unexpected error occurred: {e}')
         return False
 
 

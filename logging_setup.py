@@ -9,37 +9,38 @@ import psutil
 from track_progress import get_progress_summary
 
 
-def setup_logging(log_dir, script_name, logging_level=logging.INFO):
+def setup_logger(log_dir, name, logging_level=logging.INFO):
     """
     Set up a custom logger for a given script
 
     Args:
         log_dir (str): directory where logs should be saved
-        script_name (str): script name
+        name (str): logger name
         logging_level (int): logging level (e.g. logging.INFO, logging.DEBUG)
     """
-    log_filename = os.path.join(
-        log_dir, f'{os.path.splitext(os.path.basename(script_name))[0]}.log'
-    )
+    os.makedirs(log_dir, exist_ok=True)
+    log_filename = os.path.join(log_dir, f'{os.path.splitext(os.path.basename(name))[0]}.log')
 
     # Create formatters
-    file_formatter = logging.Formatter(
-        '%(asctime)s - Process %(process)d - %(name)s - %(levelname)s - %(message)s'
-    )
+    file_formatter = logging.Formatter('%(asctime)s - ID %(process)d - %(levelname)s - %(message)s')
     console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
+    # Filter redundant logging messages to decrease clutter
+    log_filter = LoggingFilter()
+
+    # Set up file handler
     file_handler = RotatingFileHandler(
         log_filename,
-        mode='w',
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,  # 10 MB per file, keep 5 backups
+        maxBytes=10 * 1024 * 1024,  # 10 MB per file
+        backupCount=5,  # keep 5 backups
     )
-
     file_handler.setFormatter(file_formatter)
+    file_handler.addFilter(log_filter)
 
     # Set up console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(console_formatter)
+    console_handler.addFilter(log_filter)
 
     # Configure root logger
     logging.basicConfig(
@@ -54,9 +55,18 @@ def generate_summary_report():
     conn = sqlite3.connect('progress.db')
     c = conn.cursor()
     c.execute(
-        "SELECT AVG(julianday(end_time) - julianday(start_time)) * 24 * 60 FROM processed_tiles WHERE status = 'completed'"
+        """
+        SELECT AVG(end_time - start_time) / 60.0
+        FROM processed_tiles 
+        WHERE status = 'completed' AND start_time IS NOT NULL AND end_time IS NOT NULL
+        """
     )
     avg_processing_time = c.fetchone()[0]
+
+    if avg_processing_time is None:
+        avg_time_str = 'No completed jobs yet'
+    else:
+        avg_time_str = f'{avg_processing_time:.2f} minutes'
 
     c.execute("SELECT tile_id, band, error_message FROM processed_tiles WHERE status = 'failed'")
     failed_jobs = c.fetchall()
@@ -64,13 +74,14 @@ def generate_summary_report():
     conn.close()
 
     report = f"""
+
     Processing Summary:
     -------------------
     Total Jobs: {total}
     Completed: {completed}
     Failed: {failed}
     In Progress: {in_progress}
-    Average Processing Time: {avg_processing_time:.2f} minutes
+    Average Processing Time: {avg_time_str} minutes
 
     Failed Jobs:
     ------------
@@ -81,7 +92,7 @@ def generate_summary_report():
     return report
 
 
-def report_progress_and_memory(process_ids, interval=300):  # Report every 5 minutes
+def report_progress_and_memory(process_ids, interval=120):  # Report every 5 minutes
     logger = logging.getLogger()
     while True:
         total, completed, failed, in_progress = get_progress_summary()
@@ -94,16 +105,18 @@ def report_progress_and_memory(process_ids, interval=300):  # Report every 5 min
 
 
 def get_total_memory_usage(process_ids):
-    total_memory = 0
-    for pid in process_ids:
-        try:
-            process = psutil.Process(pid)
-            total_memory += process.memory_info().rss
-        except psutil.NoSuchProcess:
-            # Process might have ended
-            pass
-    return bytes_to_gb(total_memory)
+    total_memory = sum(psutil.Process(pid).memory_info().rss for pid in process_ids)
+    return total_memory / (1024 * 1024 * 1024)
 
 
 def bytes_to_gb(bytes_value):
     return bytes_value / (1024 * 1024 * 1024)
+
+
+class LoggingFilter(logging.Filter):
+    def filter(self, record):
+        return not (
+            record.msg.startswith('Using config file')
+            and 'default-vos-config' in record.msg
+            and record.levelno == logging.INFO
+        )

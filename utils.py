@@ -6,7 +6,8 @@ from itertools import combinations
 
 import numpy as np
 import pandas as pd
-import sep
+
+# import sep
 from astropy import units as u
 from astropy.stats import SigmaClip
 from astroquery.gaia import Gaia
@@ -117,7 +118,7 @@ def remove_background(image):
 
 def get_background(data, thresh=1, bw=200, bh=200, mask=None):
     image_c = data.byteswap().newbyteorder()
-    bkg = sep.Background(image_c, maskthresh=thresh, bw=bw, bh=bh, mask=mask)
+    bkg = sep.Background(image_c, maskthresh=thresh, bw=bw, bh=bh, mask=mask)  # noqa: F821
     bkg.subfrom(image_c)
     return image_c, bkg.globalrms
 
@@ -351,31 +352,30 @@ class TileAvailability:
         except TypeError:
             return [], []
         bands_available = np.where(self.availability_matrix[index] == 1)[0]
-        return [
-            self.band_dict[list(self.band_dict.keys())[i]]['band'] for i in bands_available
-        ], bands_available
+        return [list(self.band_dict.keys())[i] for i in bands_available], bands_available
 
     def band_tiles(self, band=None):
-        return np.array(self.unique_tiles)[
+        tile_array = np.array(self.unique_tiles)[
             self.availability_matrix[:, list(self.band_dict.keys()).index(band)] == 1
         ]
+        return [tuple(tile) for tile in tile_array]
 
     def stats(self, band=None):
-        print('\nNumber of currently available tiles per band:\n')
+        logger.info('Number of currently available tiles per band:')
         max_band_name_length = max(map(len, self.band_dict.keys()))  # for output format
         for band_name, count in zip(
             self.band_dict.keys(), np.sum(self.availability_matrix, axis=0)
         ):
-            print(f'{band_name.ljust(max_band_name_length)}: \t {count}')
+            logger.info(f'{band_name.ljust(max_band_name_length)}: {count}')
 
-        print('\nNumber of tiles available in different bands:\n')
+        logger.info('Number of tiles available in different bands:')
         for bands_available, count in sorted(self.counts.items(), reverse=True):
-            print(f'In {bands_available} bands: {count}')
+            logger.info(f'In {bands_available} bands: {count}')
 
-        print(f'\nNumber of unique tiles available:\n\n{len(self.unique_tiles)}')
+        logger.info(f'Number of unique tiles available: {len(self.unique_tiles)}')
 
         if band:
-            print(f'\nNumber of tiles available in combinations containing the {band}-band:\n')
+            logger.info(f'Number of tiles available in combinations containing the {band}-band:\n')
 
             all_bands = list(self.band_dict.keys())
             all_combinations = []
@@ -389,17 +389,20 @@ class TileAvailability:
                     list(self.band_dict.keys()).index(band_c) for band_c in band_combination
                 ]
                 common_tiles = np.sum(self.availability_matrix[:, band_indices].all(axis=1))
-                print(f'{band_combination_str}: {common_tiles}')
-            print('\n')
+                logger.info(f'{band_combination_str}: {common_tiles}')
 
 
 def delete_file(file_path):
     try:
         os.remove(file_path)
-        logger.info(f'File {file_path} has been deleted successfully')
+        logger.debug(f'File {os.path.split(file_path)[1]} has been deleted successfully')
     except FileNotFoundError:
-        logger.exception(f'File {file_path} does not exist')
+        logger.exception(f'File {os.path.split(file_path)[1]} does not exist')
     except PermissionError:
-        logger.exception(f'Permission denied: unable to delete {file_path}')
+        logger.exception(f'Permission denied: unable to delete {os.path.split(file_path)[1]}')
     except Exception as e:
         logger.exception(f'An error occurred while deleting the file: {e}')
+
+
+def tile_str(tile):
+    return f'({tile[0]}, {tile[1]})'
