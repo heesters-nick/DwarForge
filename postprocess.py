@@ -1,4 +1,3 @@
-import logging
 import os
 
 import numpy as np
@@ -6,9 +5,10 @@ import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 
+from logging_setup import get_logger
 from utils import tile_str
 
-logger = logging.getLogger()
+logger = get_logger()
 
 
 def match_detections_with_catalogs(tile_nums, params_mto, table_dir, unions_cat=False):
@@ -113,12 +113,14 @@ def match_cats(df_det, df_label, tile, max_sep=15.0):
         idx, d2d, _ = c_label.match_to_catalog_3d(c_det)
     except Exception as e:
         logger.error(f'Error while matching catalogs for tile {tile_str(tile)}: {e}')
-        return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    print(f'len idx {len(idx)} for tile {tile_str(tile)}')
+        raise
+    logger.debug(f'len idx {len(idx)} for tile {tile_str(tile)}')
     # sep_constraint is a list of True/False
     sep_constraint = d2d < max_sep * u.arcsec
-    print(f'len sep contraint: {len(sep_constraint)} for tile: {tile_str(tile)}')
-    print(f'non zero in sep contraint {np.count_nonzero(sep_constraint)} for tile {tile_str(tile)}')
+    logger.debug(f'len sep contraint: {len(sep_constraint)} for tile: {tile_str(tile)}')
+    logger.debug(
+        f'non-zero in sep contraint {np.count_nonzero(sep_constraint)} for tile {tile_str(tile)}'
+    )
     label_matches = df_label[sep_constraint].reset_index(drop=True)
     label_unmatches = df_label[~sep_constraint].reset_index(drop=True)
     det_matching_idx = idx[sep_constraint]  # det_matching_idx is a list of indices
@@ -128,7 +130,7 @@ def match_cats(df_det, df_label, tile, max_sep=15.0):
 
 
 def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
-    logger.info(f'Adding labels to det params for tile {tile_str(tile)}.')
+    logger.debug(f'Adding labels to det params for tile {tile_str(tile)}.')
     det_df_updated = det_df.copy()
     dwarfs_in_tile = dwarfs_df[dwarfs_df['tile'] == tile_str(tile)].reset_index(drop=True)
     logger.info(f'Known dwarfs in tile {tile_str(tile)}: {len(dwarfs_in_tile)}')
@@ -140,63 +142,66 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
     }
 
     if len(dwarfs_in_tile) == 0:
-        logger.info(f'No known dwarfs in tile {tile_str(tile)}. Skipping matching process.')
+        logger.debug(f'No known dwarfs in tile {tile_str(tile)}. Skipping matching process.')
         return det_df_updated, matching_stats
 
     det_idx_lsb, lsb_matches, lsb_unmatches, _ = match_cats(
         det_df_updated, dwarfs_in_tile, tile, max_sep=10.0
     )
     det_idx_lsb = det_idx_lsb.astype(np.int32)
-    # add lsb labels to detections dataframe
 
+    # add lsb labels to detections dataframe
     det_df_updated['lsb'] = np.nan
     det_df_updated['ID_known'] = np.nan
 
-    try:
-        if len(det_idx_lsb) > 0:
-            logger.info(f'Found {len(det_idx_lsb)} lsb detections for tile {tile_str(tile)}.')
-            matching_stats['matched_dwarfs_count'] = len(det_idx_lsb)
-            det_df_updated.loc[det_idx_lsb, 'lsb'] = 1
-            det_df_updated.loc[det_idx_lsb, 'ID_known'] = lsb_matches['ID'].values
-            logger.debug(
-                f'Added {np.count_nonzero(~np.isnan(det_df_updated["lsb"]))} LSB labels to the detection dataframe for tile {tile} in band {band}.'
+    if len(det_idx_lsb) > 0:
+        logger.info(f'Found {len(det_idx_lsb)} lsb detections for tile {tile_str(tile)}.')
+        matching_stats['matched_dwarfs_count'] = len(det_idx_lsb)
+        det_df_updated.loc[det_idx_lsb, 'lsb'] = 1
+        # Initialize the column to accept strings
+        det_df_updated['ID_known'] = det_df_updated['ID_known'].astype(object)
+        det_df_updated.loc[det_idx_lsb, 'ID_known'] = lsb_matches['ID'].values
+        logger.debug(
+            f'Added {np.count_nonzero(~np.isnan(det_df_updated["lsb"]))} LSB labels to the detection dataframe for tile {tile} in band {band}.'
+        )
+
+    if len(lsb_unmatches) > 0:
+        logger.info(f'Found {len(lsb_unmatches)} unmatched dwarf for tile: {tile_str(tile)}.')
+        # Check unfiltered dataframe for known objects that were filtered out
+        _, full_lsb_matches, full_lsb_unmatches, full_det_matches = match_cats(
+            det_df_full, lsb_unmatches, tile, max_sep=10.0
+        )
+
+        if len(full_lsb_matches) > 0:
+            matching_stats['matched_dwarfs_count'] += len(full_lsb_matches)
+            logger.warning(
+                f'Found {len(full_lsb_matches)} known dwarfs that were filtered out in tile {tile_str(tile)} in band {band}.'
             )
-    except Exception as e:
-        logger.error(f'Error after if len(det_idx_lsb): {e}.')
 
-    try:
-        if len(lsb_unmatches) > 0:
-            logger.info(f'Found {len(lsb_unmatches)} for tile: {tile_str(tile)}.')
-            # Check unfiltered dataframe for known objects that were filtered out
-            _, full_lsb_matches, full_lsb_unmatches, full_det_matches = match_cats(
-                det_df_full, lsb_unmatches, tile, max_sep=10.0
+            # Create a new dataframe with the filtered out detections
+            new_rows = full_det_matches.copy()
+            new_rows['lsb'] = 1
+            new_rows['ID_known'] = full_lsb_matches['ID'].values
+
+            # Concatenate the new rows to det_df_updated
+            det_df_updated = pd.concat([det_df_updated, new_rows], ignore_index=True)
+
+            logger.warning(
+                f"\nAdded back {len(new_rows)} known dwarfs that were initially filtered out in\n"
+                f"tile: {tile_str(tile)}\n"
+                f"band: {band}:\n"
+                f"ID: {new_rows['ID_known'].values}\n"
+                f"mu: {[f'{mu:.3f}' for mu in new_rows['mu'].values]}\n"
+                f"r_eff: {[f'{re:.3f}' for re in new_rows['re_arcsec'].values]}\n"
+                f"ra: {new_rows['ra'].values}\n"
+                f"dec: {new_rows['dec'].values}\n"
             )
 
-            if len(full_lsb_matches) > 0:
-                matching_stats['matched_dwarfs_count'] += len(full_lsb_matches)
-                logger.warning(
-                    f'Found {len(full_lsb_matches)} known dwarfs in the unfiltered detections that were filtered out in tile {tile_str(tile)} in band {band}.'
-                )
+        matching_stats['unmatched_dwarfs_count'] = len(full_lsb_unmatches)
 
-                # Create a new dataframe with the filtered out detections
-                new_rows = full_det_matches.copy()
-                new_rows['lsb'] = 1
-                new_rows['ID_known'] = full_lsb_matches['ID'].values
-
-                # Concatenate the new rows to det_df_updated
-                det_df_updated = pd.concat([det_df_updated, new_rows], ignore_index=True)
-
-                logger.info(
-                    f'Added back {len(full_lsb_matches)} known dwarfs that were initially filtered out in tile {tile_str(tile)} in band {band}. Their mu values are: {full_lsb_matches["mu"].values}, their r_eff values are {full_lsb_matches["re_arcsec"].values}.'
-                )
-
-            matching_stats['unmatched_dwarfs_count'] = len(full_lsb_unmatches)
-
-            if len(full_lsb_unmatches) > 0:
-                logger.warning(
-                    f'Found {len(full_lsb_unmatches)} undetected but known dwarfs in tile {tile_str(tile)} in band {band}. Their IDs are: {full_lsb_unmatches["ID"].values}.'
-                )
-    except Exception as e:
-        logger.error(f'Error after if len(lsb_unmatches) > 0: {e} for tile {tile_str(tile)}.')
+        if len(full_lsb_unmatches) > 0:
+            logger.warning(
+                f'Found {len(full_lsb_unmatches)} undetected but known dwarfs in tile {tile_str(tile)} in band {band}. Their IDs are: {full_lsb_unmatches["ID"].values}.'
+            )
 
     return det_df_updated, matching_stats

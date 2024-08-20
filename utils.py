@@ -1,4 +1,3 @@
-import logging
 import os
 import re
 import time
@@ -15,9 +14,11 @@ from photutils.background import Background2D
 from sklearn.decomposition import PCA
 from vos import Client
 
+from logging_setup import get_logger
+
 client = Client()
 
-logger = logging.getLogger()
+logger = get_logger()
 
 
 def func_PCA(x, y):

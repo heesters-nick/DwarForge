@@ -1,4 +1,3 @@
-import logging
 import os
 import subprocess
 import time
@@ -10,9 +9,10 @@ from astropy.nddata import Cutout2D
 from astropy.wcs.utils import skycoord_to_pixel
 
 from kd_tree import TileWCS, query_tree, relate_coord_tile
+from logging_setup import get_logger
 from utils import tile_str
 
-logger = logging.getLogger()
+logger = get_logger()
 
 
 def tile_finder(avail, catalog, coord_c, tile_info_dir, band_constr=5):

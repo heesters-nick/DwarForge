@@ -1,4 +1,3 @@
-import logging
 import os
 import time
 
@@ -15,6 +14,7 @@ from matplotlib import pyplot as plt
 from PIL import Image, ImageDraw
 from scipy.ndimage import binary_dilation
 
+from logging_setup import get_logger
 from utils import (
     func_PCA,
     get_background,
@@ -24,7 +24,7 @@ from utils import (
     query_gaia_stars,
 )
 
-logger = logging.getLogger()
+logger = get_logger()
 
 
 def open_fits(file_path, fits_ext):

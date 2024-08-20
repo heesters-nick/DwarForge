@@ -1,8 +1,9 @@
-import logging
 import queue
 import signal
 
-logger = logging.getLogger()
+from logging_setup import get_logger
+
+logger = get_logger()
 
 from track_progress import update_tile_info  # noqa: E402
 

@@ -1,4 +1,3 @@
-import logging
 import os
 import subprocess
 import time
@@ -10,7 +9,9 @@ import pandas as pd
 # import sep
 from astropy.wcs import WCS
 
-logger = logging.getLogger()
+from logging_setup import get_logger
+
+logger = get_logger()
 
 
 def run_mto_old(

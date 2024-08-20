@@ -2,40 +2,38 @@ import argparse
 import gc
 import logging
 import multiprocessing
-import os
-import queue
-import threading
-import time
-import warnings
-from datetime import timedelta
-from multiprocessing import Manager
+import os  # noqa: E402
+import queue  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import warnings  # noqa: E402
+from datetime import timedelta  # noqa: E402
+from multiprocessing import Manager  # noqa: E402
 
-import psutil
-
-from logging_setup import (
-    generate_summary_report,
-    report_progress_and_memory,
-    setup_logger,
-)
+from logging_setup import setup_logger
 
 logger = setup_logger(
     log_dir='./logs',
     name='dwarforge',
     logging_level=logging.INFO,
 )
-
 logger = logging.getLogger()
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+import psutil  # noqa: E402
 from astropy.coordinates import SkyCoord  # noqa: E402
 from vos import Client  # noqa: E402
 
+# import logging_setup  # noqa: E402
+# Initialize logging
+# logging_setup.initialize_logging('./logs', __file__, use_mp_queue=True)
+# logger = logging_setup.get_logger()
 from detect import param_phot, run_mto  # noqa: E402
 from kd_tree import build_tree  # noqa: E402
 from postprocess import add_labels  # noqa: E402
 from preprocess import prep_tile  # noqa: E402
-from shutdown import GracefulKiller  # noqa: E402
+from shutdown import GracefulKiller, shutdown_worker  # noqa: E402
 from tile_cutter import (  # noqa: E402
     download_tile_one_band,
     tile_band_specs,
@@ -43,8 +41,11 @@ from tile_cutter import (  # noqa: E402
 )
 from track_progress import (  # noqa: E402
     MemoryTracker,
+    generate_summary_report,
+    get_progress_summary,
     get_unprocessed_jobs,
     init_db,
+    report_progress_and_memory,
     update_tile_info,
 )
 from utils import (  # noqa: E402
@@ -443,38 +444,49 @@ def input_to_tile_list(
 def download_worker(
     download_queue, ready_queue, in_dict, download_dir, db_lock, shutdown_flag, queue_lock
 ):
+    worker_id = threading.get_ident()
     while not shutdown_flag.is_set():
-        tile, band = download_queue.get(timeout=1)
-        if tile is None:  # Sentinel value to indicate end of downloads
-            break
-
-        tile_info = {
-            'tile': tile,
-            'band': band,
-            'start_time': time.time(),
-            'status': 'downloading',
-        }
-        update_tile_info(tile_info, db_lock)
-
         try:
-            tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp = tile_band_specs(
-                tile, in_dict, band, download_dir
-            )
-            success = download_tile_one_band(
-                tile, tile_fitsfilename, final_path, temp_path, vos_path, band
-            )
-            if success:
-                ready_queue.put((tile, band, final_path, fits_ext, zp))
-                tile_info['status'] = 'ready_for_processing'
-            else:
-                tile_info['status'] = 'download_failed'
-        except Exception as e:
-            tile_info['status'] = 'download_failed'
-            tile_info['error_message'] = str(e)
-        finally:
-            tile_info['end_time'] = time.time()
+            tile, band = download_queue.get(timeout=1)
+            if tile is None:  # Sentinel value to indicate end of downloads
+                logger.info(f'Download worker {worker_id} received sentinel, exiting')
+                break
+
+            tile_info = {
+                'tile': tile,
+                'band': band,
+                'start_time': time.time(),
+                'status': 'downloading',
+            }
             update_tile_info(tile_info, db_lock)
-            download_queue.task_done()
+
+            try:
+                tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp = tile_band_specs(
+                    tile, in_dict, band, download_dir
+                )
+                success = download_tile_one_band(
+                    tile, tile_fitsfilename, final_path, temp_path, vos_path, band
+                )
+                if success:
+                    ready_queue.put((tile, band, final_path, fits_ext, zp))
+                    tile_info['status'] = 'ready_for_processing'
+                else:
+                    tile_info['status'] = 'download_failed'
+            except Exception as e:
+                tile_info['status'] = 'download_failed'
+                tile_info['error_message'] = str(e)
+            finally:
+                tile_info['end_time'] = time.time()
+                update_tile_info(tile_info, db_lock)
+                download_queue.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logger.error(f'Unexpected error in download worker {worker_id}: {str(e)}')
+            if shutdown_flag.is_set():
+                break
+
+    logger.info(f'Download worker {worker_id} exiting')
 
 
 def process_tile_for_band(
@@ -495,8 +507,14 @@ def process_tile_for_band(
             tile, band, final_path, fits_ext, zp = process_queue.get(
                 timeout=120
             )  # 2 minute timeout
+            if tile is None:  # Sentinel value
+                logger.info('Received sentinel, exiting.')
+                break
         except queue.Empty:
-            logger.error('Process queue is empty.')
+            if all_downloads_complete.is_set() and process_queue.empty():
+                logger.info('Found empty queue and all downloads complete, exiting.')
+                break
+            logger.debug('Process queue is empty. Continuing to wait.')
             continue
 
         tile_info = {
@@ -549,11 +567,15 @@ def process_tile_for_band(
             delete_file(final_path)
 
             tile_info['status'] = 'completed'
+            logger.info(f'Successfully processed tile {tile_str(tile)}, band {band}.')
 
         except Exception as e:
             tile_info['status'] = 'failed'
             tile_info['error_message'] = str(e)
-            logger.error(f'Error processing tile {tile_str(tile)}, band {band}: {str(e)}')
+            logger.error(
+                f'Error processing tile {tile_str(tile)}, band {band}: {str(e)}',
+                exc_info=True,
+            )
         finally:
             tile_info['end_time'] = time.time()
 
@@ -562,7 +584,7 @@ def process_tile_for_band(
             logger.info(
                 f'Finished processing of tile {tile_str(tile)}, band {band}. '
                 f'Status: {tile_info["status"]}, '
-                f'Detections: {tile_info["detection_count"]}, '
+                f'Detections: {tile_info["detection_count"]}.'
             )
 
             gc.collect()
@@ -571,10 +593,10 @@ def process_tile_for_band(
             process_queue.task_done()
 
         if shutdown_flag.is_set():
-            logger.info(f'Process {os.getpid()} received shutdown signal. Exiting.')
+            logger.info('Received shutdown signal. Exiting.')
             break
 
-    logger.info(f'Process {os.getpid()} exiting. All tasks completed or shutdown requested.')
+    logger.info('Exiting. All tasks completed or shutdown requested.')
 
 
 def main(
@@ -663,7 +685,8 @@ def main(
         unprocessed_jobs = get_unprocessed_jobs(
             availability, process_band=anch_band, process_all_bands=process_all_avail
         )
-        logger.info(f'Number of unprocessed jobs: {len(unprocessed_jobs)}')
+        total_jobs = len(unprocessed_jobs)
+        logger.info(f'Number of unprocessed jobs: {total_jobs}')
         for job in unprocessed_jobs:
             logger.debug(f'Job: {job}')
             download_queue.put(job)
@@ -672,7 +695,7 @@ def main(
         all_downloads_complete = multiprocessing.Event()
 
         # Start download threads
-        num_download_threads = num_processing_cores  # Adjust as needed
+        num_download_threads = min(num_processing_cores, total_jobs)  # Adjust as needed
         download_threads = []
         for _ in range(num_download_threads):
             t = threading.Thread(
@@ -693,7 +716,7 @@ def main(
 
         # Start progress reporting thread
         progress_thread = threading.Thread(
-            target=report_progress_and_memory, args=(process_ids,), daemon=True
+            target=report_progress_and_memory, args=(process_ids, shutdown_flag), daemon=True
         )
         progress_thread.start()
 
@@ -722,15 +745,33 @@ def main(
             processes.append(p)
             process_ids.append(p.pid)  # Add worker process ID
 
-        # Wait for downloads to complete or for shutdown signal
-        while not download_queue.empty() and not killer.kill_now and not shutdown_flag.is_set():
-            time.sleep(1)
+        all_jobs_completed = False
+        while not killer.kill_now and not shutdown_flag.is_set():
+            total, completed, failed, in_progress = get_progress_summary()
 
-        if killer.kill_now or shutdown_flag.is_set():
-            logger.info('Initiating graceful shutdown...')
-            shutdown_flag.set()
-        else:
-            logger.info('All downloads completed. Processing continues.')
+            if completed + failed == total_jobs:
+                if not all_jobs_completed:
+                    logger.info('All jobs completed. Initiating shutdown.')
+                    all_jobs_completed = True
+                    all_downloads_complete.set()
+
+                    # Add sentinel values to signal the end of processing
+                    for _ in range(num_processing_cores):
+                        process_queue.put((None, None, None, None, None))
+
+                # Check if all worker processes have exited
+                if all(not p.is_alive() for p in processes):
+                    logger.info('All worker processes have exited. Ending main loop.')
+                    break
+
+            time.sleep(10)  # Check every 10 seconds
+
+    except Exception as e:
+        logger.error(f'An error occurred in the main process: {str(e)}')
+
+    finally:
+        logger.info('Initiating graceful shutdown...')
+        shutdown_flag.set()  # Signal all processes to shut down
 
         # Signal that all downloads are complete
         all_downloads_complete.set()
@@ -740,19 +781,17 @@ def main(
             download_queue.put((None, None))
 
         for t in download_threads:
-            t.join(timeout=10)
+            t.join(timeout=40)
 
-        # Wait for processing to complete or for a shutdown signal
-        while not process_queue.empty() and not killer.kill_now and not shutdown_flag.is_set():
-            time.sleep(1)
-
-        if killer.kill_now or shutdown_flag.is_set():
-            logger.info('Initiating graceful shutdown of processing...')
-            shutdown_flag.set()
+        # Start a shutdown worker to handle remaining items in the process queue
+        shutdown_thread = threading.Thread(
+            target=shutdown_worker, args=(process_queue, db_lock, all_downloads_complete)
+        )
+        shutdown_thread.start()
 
         # Stop worker processes
         for p in processes:
-            p.join(timeout=60)  # Give each process 60 seconds to finish
+            p.join(timeout=120)  # Give each process 60 seconds to finish
 
         # If any processes are still running, terminate them
         for p in processes:
@@ -763,13 +802,12 @@ def main(
                 p.terminate()
                 p.join()
 
-        # Stop the progress thread
-        progress_thread.join(timeout=1)  # Give the thread 1 second to finish
+        # Wait for the shutdown worker to finish
+        shutdown_thread.join(timeout=60)
 
-    except Exception as e:
-        logger.error(f'An error occurred in the main process: {str(e)}')
-        shutdown_flag.set()  # Signal all processes to shut down
-    finally:
+        # Stop the progress thread
+        progress_thread.join(timeout=5)  # Give the thread 5 second to finish
+
         # Stop the memory tracker
         memory_tracker.stop()
 
@@ -790,6 +828,8 @@ def main(
 
 
 if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn')
+
     # parse command line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -815,7 +855,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--processing_cores',
         type=int,
-        default=3,
+        default=15,
         help='Number of cores to use for processing (default: 3)',
     )
     parser.add_argument(
@@ -859,8 +899,6 @@ if __name__ == '__main__':
         'mem_track_inter': args.memory_tracking_interval,
         'mem_aggr_period': args.memory_aggregation_period,
     }
-
-    multiprocessing.set_start_method('spawn')
 
     start = time.time()
     main(**arg_dict_main)

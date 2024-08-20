@@ -15,3 +15,4 @@ astride
 vos
 psutil
 pyarrow
+concurrent-log-handler

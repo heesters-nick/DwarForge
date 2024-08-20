@@ -6,3 +6,4 @@ logs/
 bkg_orig_rms_median.txt
 bkg_rms_median.txt
 bkg_sub_rms_median.txt
+progress*

@@ -1,5 +1,4 @@
 import ctypes
-import logging
 import sqlite3
 import threading
 import time
@@ -9,9 +8,13 @@ from multiprocessing import Lock, Queue, Value
 import numpy as np
 import psutil
 
+from logging_setup import get_logger
+
+logger = get_logger()
+
 
 def init_db():
-    conn = sqlite3.connect('progress.db')
+    conn = sqlite3.connect('progress_test.db')
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS processed_tiles
                  (tile_id TEXT, 
@@ -30,7 +33,7 @@ def init_db():
 
 
 def get_unprocessed_jobs(tile_availability, process_band=None, process_all_bands=False):
-    conn = sqlite3.connect('progress.db')
+    conn = sqlite3.connect('progress_test.db')
     c = conn.cursor()
 
     unprocessed = []
@@ -39,8 +42,19 @@ def get_unprocessed_jobs(tile_availability, process_band=None, process_all_bands
         tiles_to_process = tile_availability.band_tiles(process_band)
     else:
         tiles_to_process = tile_availability.unique_tiles
+    test_tiles = [
+        (np.int64(0), np.int64(227)),
+        (np.int64(0), np.int64(228)),
+        (np.int64(0), np.int64(229)),
+        (np.int64(0), np.int64(230)),
+        (np.int64(0), np.int64(231)),
+        (np.int64(269), np.int64(268)),
+        (np.int64(263), np.int64(267)),
+        (np.int64(267), np.int64(258)),
+    ]
 
-    for tile in tiles_to_process[:16]:
+    print(test_tiles)
+    for tile in test_tiles:
         available_bands, _ = tile_availability.get_availability(tile)
         for band in available_bands:
             if process_band and not process_all_bands and band != process_band:
@@ -61,35 +75,9 @@ def get_unprocessed_jobs(tile_availability, process_band=None, process_all_bands
     return unprocessed
 
 
-# def update_progress(tile, band, status, db_lock, error_message=None):
-#     with db_lock:
-#         conn = sqlite3.connect('progress.db')
-#         c = conn.cursor()
-#         now = datetime.now().isoformat()  # type: ignore
-#         if status == 'started':
-#             c.execute(
-#                 """
-#                 INSERT OR REPLACE INTO processed_tiles (tile_id, band, start_time, status)
-#                 VALUES (?, ?, ?, ?)
-#             """,
-#                 (str(tile), band, now, status),
-#             )
-#         elif status in ['completed', 'failed']:
-#             c.execute(
-#                 """
-#                 UPDATE processed_tiles
-#                 SET end_time = ?, status = ?, error_message = ?
-#                 WHERE tile_id = ? AND band = ?
-#             """,
-#                 (now, status, error_message, str(tile), band),
-#             )
-#         conn.commit()
-#         conn.close()
-
-
 def update_tile_info(tile_info, db_lock):
     with db_lock:
-        conn = sqlite3.connect('progress.db')
+        conn = sqlite3.connect('progress_test.db')
         c = conn.cursor()
 
         fields = ['tile_id', 'band', 'status']
@@ -123,19 +111,44 @@ def update_tile_info(tile_info, db_lock):
 
 
 def get_progress_summary():
-    conn = sqlite3.connect('progress.db')
+    conn = sqlite3.connect('progress_test.db')
     c = conn.cursor()
+
+    # First, get the total number of jobs (this assumes you have a table or way to know the total number of jobs)
+    c.execute('SELECT COUNT(*) FROM all_jobs')
+    total_jobs = c.fetchone()[0]
+
+    # Then, get the progress of processed jobs
     c.execute("""
         SELECT 
-            COUNT(*) as total,
             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
             SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress
         FROM processed_tiles
     """)
-    result = c.fetchone()
+    completed, failed, in_progress = c.fetchone()
+
+    # Calculate not_started
+    not_started = total_jobs - (completed + failed + in_progress)
+
     conn.close()
-    return result
+    return (total_jobs, completed, failed, in_progress, not_started)
+
+
+# def get_progress_summary():
+#     conn = sqlite3.connect('progress_test.db')
+#     c = conn.cursor()
+#     c.execute("""
+#         SELECT
+#             COUNT(*) as total,
+#             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+#             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+#             SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress
+#         FROM processed_tiles
+#     """)
+#     result = c.fetchone()
+#     conn.close()
+#     return result
 
 
 class MemoryTracker:
@@ -207,7 +220,7 @@ class MemoryTracker:
 
 
 def check_time_recordings():
-    conn = sqlite3.connect('progress.db')
+    conn = sqlite3.connect('progress_test.db')
     c = conn.cursor()
     c.execute("""
         SELECT tile_id, band, status, start_time, end_time
@@ -230,7 +243,7 @@ def check_time_recordings():
 
 
 def debug_avg_processing_time():
-    conn = sqlite3.connect('progress.db')
+    conn = sqlite3.connect('progress_test.db')
     c = conn.cursor()
 
     c.execute(
@@ -288,6 +301,95 @@ def periodic_queue_check(download_queue, process_queue, shutdown_flag):
     while not shutdown_flag.is_set():
         download_size = download_queue.qsize()
         process_size = process_queue.qsize()
-        logger = logging.getLogger()
         logger.info(f'Queue sizes - Download: {download_size}, Process: {process_size}')
         time.sleep(60)  # Check every 60 seconds
+
+
+def generate_summary_report():
+    total, completed, failed, in_progress = get_progress_summary()
+
+    conn = sqlite3.connect('progress_test.db')
+    c = conn.cursor()
+    c.execute(
+        """
+        SELECT AVG(end_time - start_time) / 60.0
+        FROM processed_tiles 
+        WHERE status = 'completed' AND start_time IS NOT NULL AND end_time IS NOT NULL
+        """
+    )
+    avg_processing_time = c.fetchone()[0]
+
+    if avg_processing_time is None:
+        avg_time_str = 'No completed jobs yet'
+    else:
+        avg_time_str = f'{avg_processing_time:.2f} minutes'
+
+    c.execute("SELECT tile_id, band, error_message FROM processed_tiles WHERE status = 'failed'")
+    failed_jobs = c.fetchall()
+
+    conn.close()
+
+    report = f"""
+
+    Processing Summary:
+    -------------------
+    Total Jobs: {total}
+    Completed: {completed}
+    Failed: {failed}
+    In Progress: {in_progress}
+    Average Processing Time: {avg_time_str} minutes
+
+    Failed Jobs:
+    ------------
+    """
+    for job in failed_jobs:
+        report += f'Tile: {job[0]}, Band: {job[1]}, Error: {job[2]}\n\t'
+
+    return report
+
+
+def report_progress_and_memory(process_ids, shutdown_flag):
+    while not shutdown_flag.is_set():
+        try:
+            total, completed, failed, in_progress = get_progress_summary()
+            memory_usage = get_total_memory_usage(process_ids)
+
+            logger.info(
+                f'Progress: {completed}/{total} completed, {failed} failed, {in_progress} in progress'
+            )
+            logger.info(f'Total memory usage across all processes: {memory_usage:.2f} GB')
+
+            # Clean up process_ids list
+            process_ids[:] = [pid for pid in process_ids if psutil.pid_exists(pid)]
+
+            for _ in range(60):  # Check shutdown flag every second for 60 seconds
+                if shutdown_flag.is_set():
+                    break
+                time.sleep(1)
+        except Exception as e:
+            logger.error(f'Error in progress reporting: {str(e)}')
+
+    logger.info('Progress reporting thread exiting.')
+
+
+def get_total_memory_usage(process_ids):
+    total_memory = 0
+    for pid in process_ids:
+        try:
+            process = psutil.Process(pid)
+            total_memory += process.memory_info().rss
+        except psutil.NoSuchProcess:
+            logger.warning(
+                f'Process with PID {pid} no longer exists. Skipping in memory calculation.'
+            )
+        except psutil.AccessDenied:
+            logger.warning(
+                f'Access denied to process with PID {pid}. Skipping in memory calculation.'
+            )
+        except Exception as e:
+            logger.error(f'Error getting memory info for process {pid}: {str(e)}')
+    return total_memory / (1024 * 1024 * 1024)  # Convert to GB
+
+
+def bytes_to_gb(bytes_value):
+    return bytes_value / (1024 * 1024 * 1024)
