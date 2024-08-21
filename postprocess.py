@@ -7,6 +7,7 @@ from astropy.coordinates import SkyCoord
 
 from logging_setup import get_logger
 from utils import tile_str
+from warning_manager import set_warnings
 
 logger = get_logger()
 
@@ -130,6 +131,8 @@ def match_cats(df_det, df_label, tile, max_sep=15.0):
 
 
 def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
+    warnings = []
+
     logger.debug(f'Adding labels to det params for tile {tile_str(tile)}.')
     det_df_updated = det_df.copy()
     dwarfs_in_tile = dwarfs_df[dwarfs_df['tile'] == tile_str(tile)].reset_index(drop=True)
@@ -166,7 +169,9 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
         )
 
     if len(lsb_unmatches) > 0:
-        logger.info(f'Found {len(lsb_unmatches)} unmatched dwarf for tile: {tile_str(tile)}.')
+        warning_msg = f'Found {len(lsb_unmatches)} unmatched dwarf for tile: {tile_str(tile)}.'
+        logger.warning(warning_msg)
+        warnings.append(warning_msg)
         # Check unfiltered dataframe for known objects that were filtered out
         _, full_lsb_matches, full_lsb_unmatches, full_det_matches = match_cats(
             det_df_full, lsb_unmatches, tile, max_sep=10.0
@@ -174,9 +179,8 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
 
         if len(full_lsb_matches) > 0:
             matching_stats['matched_dwarfs_count'] += len(full_lsb_matches)
-            logger.warning(
-                f'Found {len(full_lsb_matches)} known dwarfs that were filtered out in tile {tile_str(tile)} in band {band}.'
-            )
+            warning_msg = f'Found {len(full_lsb_matches)} known dwarf(s) that was/were filtered out in tile {tile_str(tile)} in band {band}.'
+            logger.warning(warning_msg)
 
             # Create a new dataframe with the filtered out detections
             new_rows = full_det_matches.copy()
@@ -186,22 +190,33 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
             # Concatenate the new rows to det_df_updated
             det_df_updated = pd.concat([det_df_updated, new_rows], ignore_index=True)
 
-            logger.warning(
-                f"\nAdded back {len(new_rows)} known dwarfs that were initially filtered out in\n"
-                f"tile: {tile_str(tile)}\n"
-                f"band: {band}:\n"
-                f"ID: {new_rows['ID_known'].values}\n"
-                f"mu: {[f'{mu:.3f}' for mu in new_rows['mu'].values]}\n"
-                f"r_eff: {[f'{re:.3f}' for re in new_rows['re_arcsec'].values]}\n"
-                f"ra: {new_rows['ra'].values}\n"
-                f"dec: {new_rows['dec'].values}\n"
+            warning_msg = (
+                f"Added back {len(new_rows)} known dwarf(s) that was/were initially filtered out in\n\t"
+                f"tile: {tile_str(tile)}\n\t"
+                f"band: {band}:\n\t"
+                f"ID: {new_rows['ID_known'].values}\n\t"
+                f"mu: {[f'{mu:.3f}' for mu in new_rows['mu'].values]}\n\t"
+                f"r_eff: {[f'{re:.3f}' for re in new_rows['re_arcsec'].values]}\n\t"
+                f"ra: {new_rows['ra'].values}\n\t"
+                f"dec: {new_rows['dec'].values}\t"
             )
+            logger.warning(warning_msg)
+            warnings.append(warning_msg)
 
         matching_stats['unmatched_dwarfs_count'] = len(full_lsb_unmatches)
 
         if len(full_lsb_unmatches) > 0:
-            logger.warning(
-                f'Found {len(full_lsb_unmatches)} undetected but known dwarfs in tile {tile_str(tile)} in band {band}. Their IDs are: {full_lsb_unmatches["ID"].values}.'
+            warning_msg = (
+                f"Found {len(full_lsb_unmatches)} undetected but known dwarfs in\n\t"
+                f"tile: {tile_str(tile)}\n\t"
+                f"band: {band}\n\t"
+                f"ID(s): {full_lsb_unmatches['ID'].values}\n\t"
+                f"ra: {full_lsb_unmatches['ra'].values}\n\t"
+                f"dec: {full_lsb_unmatches['dec'].values}\n\t"
             )
+            logger.warning(warning_msg)
+            warnings.append(warning_msg)
+
+    set_warnings(warnings)
 
     return det_df_updated, matching_stats

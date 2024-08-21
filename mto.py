@@ -8,41 +8,47 @@ try:
     image, params = mto.setup()
 except Exception as e:
     print(f'Error while executing mto.setup(): {e}')
-
+    raise
 try:
     # Pre-process the image
     processed_image = mto.preprocess_image(image, params, n=2)
 except Exception as e:
     print(f'Error while executing mto.preprocess_image: {e}')
+    raise
 
 try:
     # Build a max tree
     mt = mto.build_max_tree(processed_image, params)
 except Exception as e:
     print(f'Error while executing mto.build_max_tree: {e}')
+    raise
 
 try:
     # Filter the tree and find objects
     id_map, sig_ancs = mto.filter_tree(mt, processed_image, params)
 except Exception as e:
     print(f'Error while executing mto.filter_tree: {e}')
+    raise
 
 try:
     # Relabel objects for clearer visualisation
     id_map = mto.relabel_segments(id_map, shuffle_labels=False)
 except Exception as e:
     print(f'Error while executing mto.relabel_segments: {e}')
+    raise
 
 try:
     # Generate output files
     mto.generate_image(image, id_map, params)
 except Exception as e:
     print(f'Error while executing mto.generate_image: {e}')
+    raise
 
 try:
     mto.generate_parameters(image, id_map, sig_ancs, params)
 except Exception as e:
     print(f'Error while executing mto.generate_parameters: {e}')
+    raise
 
 
 # Function to measure and print execution time

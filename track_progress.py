@@ -12,6 +12,8 @@ from logging_setup import get_logger
 
 logger = get_logger()
 
+from utils import extract_tile_numbers_from_job  # noqa: E402
+
 
 def init_db():
     conn = sqlite3.connect('progress_test.db')
@@ -53,7 +55,7 @@ def get_unprocessed_jobs(tile_availability, process_band=None, process_all_bands
         (np.int64(267), np.int64(258)),
     ]
 
-    print(test_tiles)
+    # print(test_tiles)
     for tile in test_tiles:
         available_bands, _ = tile_availability.get_availability(tile)
         for band in available_bands:
@@ -110,13 +112,9 @@ def update_tile_info(tile_info, db_lock):
         conn.close()
 
 
-def get_progress_summary():
+def get_progress_summary(total_jobs):
     conn = sqlite3.connect('progress_test.db')
     c = conn.cursor()
-
-    # First, get the total number of jobs (this assumes you have a table or way to know the total number of jobs)
-    c.execute('SELECT COUNT(*) FROM all_jobs')
-    total_jobs = c.fetchone()[0]
 
     # Then, get the progress of processed jobs
     c.execute("""
@@ -128,27 +126,16 @@ def get_progress_summary():
     """)
     completed, failed, in_progress = c.fetchone()
 
+    # Handle None values
+    completed = completed or 0
+    failed = failed or 0
+    in_progress = in_progress or 0
+
     # Calculate not_started
     not_started = total_jobs - (completed + failed + in_progress)
 
     conn.close()
     return (total_jobs, completed, failed, in_progress, not_started)
-
-
-# def get_progress_summary():
-#     conn = sqlite3.connect('progress_test.db')
-#     c = conn.cursor()
-#     c.execute("""
-#         SELECT
-#             COUNT(*) as total,
-#             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-#             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-#             SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress
-#         FROM processed_tiles
-#     """)
-#     result = c.fetchone()
-#     conn.close()
-#     return result
 
 
 class MemoryTracker:
@@ -305,8 +292,8 @@ def periodic_queue_check(download_queue, process_queue, shutdown_flag):
         time.sleep(60)  # Check every 60 seconds
 
 
-def generate_summary_report():
-    total, completed, failed, in_progress = get_progress_summary()
+def generate_summary_report(total_jobs):
+    total, completed, failed, in_progress, not_started = get_progress_summary(total_jobs)
 
     conn = sqlite3.connect('progress_test.db')
     c = conn.cursor()
@@ -337,25 +324,26 @@ def generate_summary_report():
     Completed: {completed}
     Failed: {failed}
     In Progress: {in_progress}
-    Average Processing Time: {avg_time_str} minutes
+    Not Started: {not_started}
+    Average Processing Time: {avg_time_str}
 
     Failed Jobs:
     ------------
     """
     for job in failed_jobs:
-        report += f'Tile: {job[0]}, Band: {job[1]}, Error: {job[2]}\n\t'
+        report += f'\n\tTile: {extract_tile_numbers_from_job(job[0])}, Band: {job[1]}\n\tError(s):\n\t{job[2]}\n\t'
 
     return report
 
 
-def report_progress_and_memory(process_ids, shutdown_flag):
+def report_progress_and_memory(total_jobs, process_ids, shutdown_flag):
     while not shutdown_flag.is_set():
         try:
-            total, completed, failed, in_progress = get_progress_summary()
+            total, completed, failed, in_progress, not_started = get_progress_summary(total_jobs)
             memory_usage = get_total_memory_usage(process_ids)
 
             logger.info(
-                f'Progress: {completed}/{total} completed, {failed} failed, {in_progress} in progress'
+                f'Progress: {completed}/{total} completed, {failed} failed, {in_progress} in progress, {not_started} not started.'
             )
             logger.info(f'Total memory usage across all processes: {memory_usage:.2f} GB')
 

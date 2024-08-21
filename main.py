@@ -25,10 +25,6 @@ import psutil  # noqa: E402
 from astropy.coordinates import SkyCoord  # noqa: E402
 from vos import Client  # noqa: E402
 
-# import logging_setup  # noqa: E402
-# Initialize logging
-# logging_setup.initialize_logging('./logs', __file__, use_mp_queue=True)
-# logger = logging_setup.get_logger()
 from detect import param_phot, run_mto  # noqa: E402
 from kd_tree import build_tree  # noqa: E402
 from postprocess import add_labels  # noqa: E402
@@ -56,6 +52,7 @@ from utils import (  # noqa: E402
     tile_str,
     update_available_tiles,
 )
+from warning_manager import clear_warnings, get_warnings  # noqa: E402
 
 warnings.filterwarnings('ignore', message="'datfix' made the change", append=True)
 warnings.filterwarnings(
@@ -159,7 +156,7 @@ save_plot = True
 # define the band that should be used to detect objects
 anchor_band = 'cfis_lsb-r'
 # process all available tiles
-process_all_available = False
+process_all_available = True
 # define the square cutout size in pixels
 cutout_size = 224
 # minimum surface brightness to select objects
@@ -554,20 +551,33 @@ def process_tile_for_band(
 
             # Match detections with catalog
             if input_catalog is not None:
+                clear_warnings()
                 mto_det, matching_stats = add_labels(
                     tile, band, det_df=mto_det, det_df_full=mto_all, dwarfs_df=input_catalog
                 )
                 tile_info.update(matching_stats)
 
+                match_warnings = get_warnings()
+                if match_warnings:
+                    tile_info['status'] = 'failed'
+                    tile_info['error_message'] = '\n\t'.join(match_warnings)
+
             tile_info['detection_count'] = len(mto_det)
 
             # delete raw data
-            delete_file(param_path)
-            delete_file(prepped_path)
             delete_file(final_path)
 
-            tile_info['status'] = 'completed'
-            logger.info(f'Successfully processed tile {tile_str(tile)}, band {band}.')
+            if tile_info['status'] != 'failed':
+                tile_info['status'] = 'completed'
+                logger.info(f'Successfully processed tile {tile_str(tile)}, band {band}.')
+                # delete rebinned data + full MTO parameter file only when processing finished without errors
+                delete_file(param_path)
+                delete_file(prepped_path)
+
+            else:
+                logger.warning(
+                    f'Warning was raised while matching to catalog. Revisit tile {tile_str(tile)}, band {band}.'
+                )
 
         except Exception as e:
             tile_info['status'] = 'failed'
@@ -587,6 +597,7 @@ def process_tile_for_band(
                 f'Detections: {tile_info["detection_count"]}.'
             )
 
+            # garbage collection to keep memory consumption low
             gc.collect()
 
             # Mark the task as done in the queue
@@ -716,7 +727,9 @@ def main(
 
         # Start progress reporting thread
         progress_thread = threading.Thread(
-            target=report_progress_and_memory, args=(process_ids, shutdown_flag), daemon=True
+            target=report_progress_and_memory,
+            args=(total_jobs, process_ids, shutdown_flag),
+            daemon=True,
         )
         progress_thread.start()
 
@@ -747,7 +760,12 @@ def main(
 
         all_jobs_completed = False
         while not killer.kill_now and not shutdown_flag.is_set():
-            total, completed, failed, in_progress = get_progress_summary()
+            total, completed, failed, in_progress, not_started = get_progress_summary(total_jobs)
+
+            logger.info(
+                f'Progress waiting: {completed}/{total} completed, {failed} failed, '
+                f'{in_progress} in progress, {not_started} not started'
+            )
 
             if completed + failed == total_jobs:
                 if not all_jobs_completed:
@@ -823,7 +841,7 @@ def main(
             logger.warning('No memory usage data was collected.')
 
         # Generate and log summary report
-        summary_report = generate_summary_report()
+        summary_report = generate_summary_report(total_jobs)
         logger.info(summary_report)
 
 

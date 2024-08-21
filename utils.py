@@ -407,3 +407,11 @@ def delete_file(file_path):
 
 def tile_str(tile):
     return f'({tile[0]}, {tile[1]})'
+
+
+def extract_tile_numbers_from_job(s):
+    # Remove the outer parentheses and split by comma
+    parts = s.strip('()').split(',')
+    # Extract the numbers from each part
+    numbers = [int(part.split('(')[1].split(')')[0]) for part in parts]
+    return tuple(numbers)
