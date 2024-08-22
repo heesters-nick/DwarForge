@@ -1,3 +1,4 @@
+import ast
 import os
 import re
 import time
@@ -8,7 +9,9 @@ import pandas as pd
 
 # import sep
 from astropy import units as u
+from astropy.coordinates import SkyCoord
 from astropy.stats import SigmaClip
+from astropy.wcs import WCS
 from astroquery.gaia import Gaia
 from photutils.background import Background2D
 from sklearn.decomposition import PCA
@@ -415,3 +418,40 @@ def extract_tile_numbers_from_job(s):
     # Extract the numbers from each part
     numbers = [int(part.split('(')[1].split(')')[0]) for part in parts]
     return tuple(numbers)
+
+
+def get_neighboring_tile_numbers(tile):
+    tile = ast.literal_eval(tile)
+    x, y = map(int, tile)
+    neighbors = [
+        (x - 1, y - 1),
+        (x - 1, y),
+        (x - 1, y + 1),
+        (x, y - 1),
+        (x, y + 1),
+        (x + 1, y - 1),
+        (x + 1, y),
+        (x + 1, y + 1),
+    ]
+    return [f'({nx:03d}, {ny:03d})' for nx, ny in neighbors if 0 <= nx < 1000 and 0 <= ny < 1000]
+
+
+def check_objects_in_neighboring_tiles(tile, dwarfs_df, header):
+    wcs = WCS(header)
+    # Get neighboring tile numbers
+    neighboring_tiles = get_neighboring_tile_numbers(tile)
+
+    # Filter dwarfs in neighboring tiles
+    neighboring_dwarfs = dwarfs_df[dwarfs_df['tile'].isin(neighboring_tiles)]
+
+    # Check which of these dwarfs are actually within the current tile's boundaries
+    dwarfs_in_current_tile = neighboring_dwarfs[
+        neighboring_dwarfs.apply(
+            lambda row: wcs.footprint_contains(
+                SkyCoord(row['ra'], row['dec'], unit='deg', frame='icrs')
+            ),
+            axis=1,
+        )
+    ]
+
+    return dwarfs_in_current_tile

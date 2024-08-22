@@ -44,19 +44,20 @@ def get_unprocessed_jobs(tile_availability, process_band=None, process_all_bands
         tiles_to_process = tile_availability.band_tiles(process_band)
     else:
         tiles_to_process = tile_availability.unique_tiles
-    test_tiles = [
-        (np.int64(0), np.int64(227)),
-        (np.int64(0), np.int64(228)),
-        (np.int64(0), np.int64(229)),
-        (np.int64(0), np.int64(230)),
-        (np.int64(0), np.int64(231)),
-        (np.int64(269), np.int64(268)),
-        (np.int64(263), np.int64(267)),
-        (np.int64(267), np.int64(258)),
-    ]
+
+    # test_tiles = [
+    #     (np.int64(0), np.int64(227)),
+    #     (np.int64(0), np.int64(228)),
+    #     (np.int64(0), np.int64(229)),
+    #     (np.int64(0), np.int64(230)),
+    #     (np.int64(0), np.int64(231)),
+    #     (np.int64(269), np.int64(268)),
+    #     (np.int64(263), np.int64(267)),
+    #     (np.int64(267), np.int64(258)),
+    # ]
 
     # print(test_tiles)
-    for tile in test_tiles:
+    for tile in tiles_to_process:
         available_bands, _ = tile_availability.get_availability(tile)
         for band in available_bands:
             if process_band and not process_all_bands and band != process_band:

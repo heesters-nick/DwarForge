@@ -166,7 +166,7 @@ reff_limit = 1.6
 
 
 # retrieve from the VOSpace and update the currently available tiles; takes some time to run
-update_tiles = False
+update_tiles = True
 # build kd tree with updated tiles otherwise use the already saved tree
 if update_tiles:
     build_new_kdtree = True
@@ -548,12 +548,18 @@ def process_tile_for_band(
 
             # save filtered MTO detections
             mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
+            mto_all.to_csv(param_path, index=False)
 
             # Match detections with catalog
             if input_catalog is not None:
                 clear_warnings()
                 mto_det, matching_stats = add_labels(
-                    tile, band, det_df=mto_det, det_df_full=mto_all, dwarfs_df=input_catalog
+                    tile,
+                    band,
+                    det_df=mto_det,
+                    det_df_full=mto_all,
+                    dwarfs_df=input_catalog,
+                    header=prepped_header,
                 )
                 tile_info.update(matching_stats)
 

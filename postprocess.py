@@ -7,7 +7,7 @@ from astropy.coordinates import SkyCoord
 from scipy.spatial import cKDTree
 
 from logging_setup import get_logger
-from utils import tile_str
+from utils import check_objects_in_neighboring_tiles, tile_str
 from warning_manager import set_warnings
 
 logger = get_logger()
@@ -131,7 +131,7 @@ def match_cats_older(df_det, df_label, tile, max_sep=15.0):
     return det_matching_idx, label_matches, label_unmatches, det_matches
 
 
-def match_cats(df_det, df_label, tile, max_sep=15.0):
+def match_cats(df_det, df_label, tile, header, max_sep=15.0):
     """
     Match detections to known objects preferring larger, lsb objects
 
@@ -139,6 +139,7 @@ def match_cats(df_det, df_label, tile, max_sep=15.0):
         df_det (dataframe): detections dataframe
         df_label (dataframe): dataframe of objects with labels
         tile (tuple): tile numbers
+        header (header): fits header
         max_sep (float): base maximum separation tolerance in arcseconds
 
     Returns:
@@ -147,74 +148,57 @@ def match_cats(df_det, df_label, tile, max_sep=15.0):
         label_unmatches (dataframe): known objects that were not detected
         det_matches (dataframe): detections that are known objects
         matches (list): list of (known_idx, detection_idx) pairs
-        potential_matches_df (dataframe): all potential matches considered
     """
     tree = cKDTree(np.column_stack((df_det['ra'], df_det['dec'])))
     matches = []
+    potential_matches_df = pd.DataFrame()
 
     for idx, known in df_label.iterrows():
         known_coords = SkyCoord(known['ra'], known['dec'], unit='deg')
 
-        # Adaptive search radius
+        # Adaptive search radius (keep using re for this, but we'll be more cautious with it later)
         if (
             're' in known
             and known['re'] is not None
             and not np.isnan(known['re'])
             and known['re'] > 0
         ):
-            search_radius = max(max_sep, known['re'] * 2.5) / 3600
+            search_radius = max(max_sep, known['re'] * 3) / 3600
         else:
             search_radius = max_sep / 3600
 
         potential_match_indices = tree.query_ball_point([known['ra'], known['dec']], search_radius)
         potential_matches = df_det.iloc[potential_match_indices]
 
+        print(f'potential matches for {known["ID"]}: {len(potential_matches)}')
+
+        potential_matches_df = pd.concat([potential_matches_df, potential_matches])
+
         if len(potential_matches) > 0:
-            # Find the largest object
-            largest_object = potential_matches.loc[potential_matches['re_arcsec'].idxmax()]
-
-            # Identify objects potentially part of larger structures
-            possibly_enclosed = potential_matches[
-                (potential_matches['ra'] - largest_object['ra']) ** 2
-                + (potential_matches['dec'] - largest_object['dec']) ** 2
-                <= (largest_object['re_arcsec'] / 3600 * 1.5) ** 2  # Allow some margin
-            ]
-
-            # Precalculate some values
             potential_matches_coords = SkyCoord(
                 potential_matches['ra'], potential_matches['dec'], unit='deg'
             )
             distances = known_coords.separation(potential_matches_coords).arcsec
-            max_re = potential_matches['re_arcsec'].max()
+            max_n_pix = potential_matches['n_pix'].max()
             max_mu = potential_matches['mu'].max()
 
             scores = []
             for i, det in potential_matches.iterrows():
-                # Size comparison score
-                if (
-                    're' in known
-                    and known['re'] is not None
-                    and not np.isnan(known['re'])
-                    and known['re'] > 0
-                ):
-                    size_diff = abs(known['re'] - det['re_arcsec']) / known['re']
-                    size_score = 1 / (1 + size_diff)
-                else:
-                    size_score = 1
+                # Size comparison score (now using n_pix)
+                size_score = np.log1p(det['n_pix']) / np.log1p(max_n_pix)
 
-                # LSB characteristics score
-                lsb_score = (det['re_arcsec'] / max_re) * (max_mu / det['mu'])
+                # LSB characteristics score (now incorporating n_pix)
+                lsb_score = det['mu'] / max_mu
 
-                # Structural position score
-                structural_score = 1.5 if i in possibly_enclosed.index else 1
+                # Distance score
+                distance_score = 1 / (1 + distances[potential_matches.index.get_loc(i)])
 
                 # Combined score (adjust weights as needed)
-                score = (
-                    lsb_score * 0.4
-                    + size_score * 0.3
-                    + structural_score * 0.2
-                    + (1 / (1 + distances[potential_matches.index.get_loc(i)])) * 0.1
-                )
+                score = lsb_score * 0.2 + size_score * 0.4 + distance_score * 0.4
+                logger.debug(f'object: {det["ID"]}; lsb_score: {lsb_score}')
+                logger.debug(f'object: {det["ID"]}; size_score: {size_score}')
+                logger.debug(f'object: {det["ID"]}; distance_score: {distance_score}')
+                logger.debug(f'object: {det["ID"]}; total score: {score}')
                 scores.append((i, score))
 
             best_match = max(scores, key=lambda x: x[1])
@@ -229,21 +213,23 @@ def match_cats(df_det, df_label, tile, max_sep=15.0):
     label_unmatches = df_label.drop(list(label_match_idx)).reset_index(drop=True)
     det_matches = df_det.loc[list(det_match_idx)].reset_index(drop=True)
 
-    return (
-        list(det_match_idx),
-        label_matches,
-        label_unmatches,
-        det_matches,
-    )
+    return list(det_match_idx), label_matches, label_unmatches, det_matches
 
 
-def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
+def add_labels(tile, band, det_df, det_df_full, dwarfs_df, header):
+    logger.debug(f'Adding labels to det params for tile {tile_str(tile)}.')
+
     warnings = []
 
-    logger.debug(f'Adding labels to det params for tile {tile_str(tile)}.')
     det_df_updated = det_df.copy()
     dwarfs_in_tile = dwarfs_df[dwarfs_df['tile'] == tile_str(tile)].reset_index(drop=True)
     logger.info(f'Known dwarfs in tile {tile_str(tile)}: {len(dwarfs_in_tile)}')
+    # Check for objects in neighboring tiles
+    additional_dwarfs = check_objects_in_neighboring_tiles(tile_str(tile), dwarfs_df, header)
+    if not additional_dwarfs.empty:
+        dwarfs_in_tile = pd.concat([dwarfs_in_tile, additional_dwarfs]).reset_index(drop=True)
+        logger.info(f'Added {len(additional_dwarfs)} dwarfs from neighboring tiles.')
+        logger.info(f'New total in tile {tile_str(tile)}: {len(dwarfs_in_tile)}')
 
     matching_stats = {
         'known_dwarfs_count': len(dwarfs_in_tile),
@@ -256,7 +242,7 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
         return det_df_updated, matching_stats
 
     det_idx_lsb, lsb_matches, lsb_unmatches, _ = match_cats(
-        det_df_updated, dwarfs_in_tile, tile, max_sep=15.0
+        det_df_updated, dwarfs_in_tile, tile, header, max_sep=15.0
     )
 
     # add lsb labels to detections dataframe
@@ -280,7 +266,7 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df):
         warnings.append(warning_msg)
         # Check unfiltered dataframe for known objects that were filtered out
         _, full_lsb_matches, full_lsb_unmatches, full_det_matches = match_cats(
-            det_df_full, lsb_unmatches, tile, max_sep=15.0
+            det_df_full, lsb_unmatches, tile, header, max_sep=15.0
         )
 
         if len(full_lsb_matches) > 0:
