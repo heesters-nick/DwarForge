@@ -156,7 +156,7 @@ save_plot = True
 # define the band that should be used to detect objects
 anchor_band = 'cfis_lsb-r'
 # process all available tiles
-process_all_available = True
+process_all_available = False
 # define the square cutout size in pixels
 cutout_size = 224
 # minimum surface brightness to select objects
