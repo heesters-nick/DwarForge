@@ -37,7 +37,7 @@ def setup_logger(log_dir, name, logging_level=logging.INFO):
     file_handler = ConcurrentRotatingFileHandler(
         log_filename,
         maxBytes=10 * 1024 * 1024,  # 10 MB per file
-        backupCount=0,  # keep all log files
+        backupCount=1000,  # keep all log files
     )
     file_handler.setFormatter(file_formatter)
     file_handler.addFilter(log_filter)

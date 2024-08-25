@@ -15,8 +15,8 @@ logger = get_logger()
 from utils import extract_tile_numbers_from_job  # noqa: E402
 
 
-def init_db():
-    conn = sqlite3.connect('progress_test.db')
+def init_db(database):
+    conn = sqlite3.connect(database)
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS processed_tiles
                  (tile_id TEXT, 
@@ -34,8 +34,8 @@ def init_db():
     conn.close()
 
 
-def get_unprocessed_jobs(tile_availability, process_band=None, process_all_bands=False):
-    conn = sqlite3.connect('progress_test.db')
+def get_unprocessed_jobs(database, tile_availability, process_band=None, process_all_bands=False):
+    conn = sqlite3.connect(database)
     c = conn.cursor()
 
     unprocessed = []
@@ -78,9 +78,9 @@ def get_unprocessed_jobs(tile_availability, process_band=None, process_all_bands
     return unprocessed
 
 
-def update_tile_info(tile_info, db_lock):
+def update_tile_info(database, tile_info, db_lock):
     with db_lock:
-        conn = sqlite3.connect('progress_test.db')
+        conn = sqlite3.connect(database)
         c = conn.cursor()
 
         fields = ['tile_id', 'band', 'status']
@@ -113,30 +113,54 @@ def update_tile_info(tile_info, db_lock):
         conn.close()
 
 
-def get_progress_summary(total_jobs):
-    conn = sqlite3.connect('progress_test.db')
+def get_progress_summary(
+    database, tile_availability, bands, unprocessed_jobs_at_start, processed_in_current_run
+):
+    conn = sqlite3.connect(database)
     c = conn.cursor()
 
-    # Then, get the progress of processed jobs
-    c.execute("""
-        SELECT 
-            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-            SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress
-        FROM processed_tiles
-    """)
-    completed, failed, in_progress = c.fetchone()
+    results = {}
+    for band in bands:
+        # Get total available tiles for the band
+        total_available = len(tile_availability.band_tiles(band))
 
-    # Handle None values
-    completed = completed or 0
-    failed = failed or 0
-    in_progress = in_progress or 0
+        # Get overall completed, failed, and in-progress counts
+        c.execute(
+            """
+            SELECT 
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress
+            FROM processed_tiles
+            WHERE band = ?
+        """,
+            (band,),
+        )
 
-    # Calculate not_started
-    not_started = total_jobs - (completed + failed + in_progress)
+        result = c.fetchone()
+        total_completed, total_failed, in_progress = (
+            result[0] or 0,
+            result[1] or 0,
+            result[2] or 0,
+        )
+
+        # Get processed count for the current run
+        current_run_processed = processed_in_current_run[band]
+
+        # Calculate remaining jobs in the current run
+        remaining_in_run = max(0, unprocessed_jobs_at_start[band] - current_run_processed)
+
+        results[band] = {
+            'total_available': total_available,
+            'total_completed': total_completed,
+            'total_failed': total_failed,
+            'in_progress': in_progress,
+            'current_run_processed': current_run_processed,
+            'remaining_in_run': remaining_in_run,
+        }
 
     conn.close()
-    return (total_jobs, completed, failed, in_progress, not_started)
+    return results
 
 
 class MemoryTracker:
@@ -207,8 +231,8 @@ class MemoryTracker:
         return overall_peak, mean_of_means, overall_std, runtime_hours
 
 
-def check_time_recordings():
-    conn = sqlite3.connect('progress_test.db')
+def check_time_recordings(database):
+    conn = sqlite3.connect(database)
     c = conn.cursor()
     c.execute("""
         SELECT tile_id, band, status, start_time, end_time
@@ -230,8 +254,8 @@ def check_time_recordings():
     return bool(results)
 
 
-def debug_avg_processing_time():
-    conn = sqlite3.connect('progress_test.db')
+def debug_avg_processing_time(database):
+    conn = sqlite3.connect(database)
     c = conn.cursor()
 
     c.execute(
@@ -293,11 +317,30 @@ def periodic_queue_check(download_queue, process_queue, shutdown_flag):
         time.sleep(60)  # Check every 60 seconds
 
 
-def generate_summary_report(total_jobs):
-    total, completed, failed, in_progress, not_started = get_progress_summary(total_jobs)
+def generate_summary_report(
+    database,
+    tile_availability,
+    bands_to_report,
+    unprocessed_jobs_at_start,
+    processed_in_current_run,
+):
+    progress_results = get_progress_summary(
+        database,
+        tile_availability,
+        bands_to_report,
+        unprocessed_jobs_at_start,
+        processed_in_current_run,
+    )
 
-    conn = sqlite3.connect('progress_test.db')
+    conn = sqlite3.connect(database)
     c = conn.cursor()
+
+    total_jobs = sum(unprocessed_jobs_at_start.values())
+    total_completed = sum(progress_results[band]['total_completed'] for band in bands_to_report)
+    total_failed = sum(progress_results[band]['total_failed'] for band in bands_to_report)
+    total_in_progress = sum(progress_results[band]['in_progress'] for band in bands_to_report)
+    total_remaining = sum(progress_results[band]['remaining_in_run'] for band in bands_to_report)
+
     c.execute(
         """
         SELECT AVG(end_time - start_time) / 60.0
@@ -318,16 +361,31 @@ def generate_summary_report(total_jobs):
     conn.close()
 
     report = f"""
-
     Processing Summary:
     -------------------
-    Total Jobs: {total}
-    Completed: {completed}
-    Failed: {failed}
-    In Progress: {in_progress}
-    Not Started: {not_started}
+    Total Jobs: {total_jobs}
+    Completed: {total_completed}
+    Failed: {total_failed}
+    In Progress: {total_in_progress}
+    Remaining: {total_remaining}
     Average Processing Time: {avg_time_str}
 
+    Per-Band Summary:
+    -----------------
+    """
+
+    for band in bands_to_report:
+        stats = progress_results[band]
+        report += f"""
+    Band {band}:
+        Total Available: {stats['total_available']}
+        Completed: {stats['total_completed']}
+        Failed: {stats['total_failed']}
+        In Progress: {stats['in_progress']}
+        Remaining in Run: {stats['remaining_in_run']}
+        """
+
+    report += """
     Failed Jobs:
     ------------
     """
@@ -337,16 +395,42 @@ def generate_summary_report(total_jobs):
     return report
 
 
-def report_progress_and_memory(total_jobs, process_ids, shutdown_flag):
+def report_progress_and_memory(
+    database,
+    tile_availability,
+    bands_to_report,
+    unprocessed_jobs_at_start,
+    processed_in_current_run,
+    process_ids,
+    shutdown_flag,
+):
     while not shutdown_flag.is_set():
         try:
-            total, completed, failed, in_progress, not_started = get_progress_summary(total_jobs)
+            progress_results = get_progress_summary(
+                database,
+                tile_availability,
+                bands_to_report,
+                unprocessed_jobs_at_start,
+                processed_in_current_run,
+            )
             memory_usage = get_total_memory_usage(process_ids)
 
-            logger.info(
-                f'Progress: {completed}/{total} completed, {failed} failed, {in_progress} in progress, {not_started} not started.'
-            )
-            logger.info(f'Total memory usage across all processes: {memory_usage:.2f} GB')
+            # Collect all log messages
+            log_messages = []
+            for band in bands_to_report:
+                stats = progress_results[band]
+                log_messages.append(f'\nProgress for band {band}:')
+                log_messages.append(
+                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed"
+                )
+                log_messages.append(
+                    f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['remaining_in_run']} remaining"
+                )
+
+            log_messages.append(f'\nTotal memory usage across all processes: {memory_usage:.2f} GB')
+
+            # Log all messages together
+            logger.info('\n'.join(log_messages))
 
             # Clean up process_ids list
             process_ids[:] = [pid for pid in process_ids if psutil.pid_exists(pid)]

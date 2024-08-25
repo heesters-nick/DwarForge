@@ -8,7 +8,9 @@ import threading  # noqa: E402
 import time  # noqa: E402
 import warnings  # noqa: E402
 from datetime import timedelta  # noqa: E402
-from multiprocessing import Manager  # noqa: E402
+from multiprocessing import (
+    Manager,  # noqa: E402
+)
 
 from logging_setup import setup_logger
 
@@ -154,7 +156,7 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'cfis_lsb-r'
+anchor_band = 'whigs-g'
 # process all available tiles
 process_all_available = False
 # define the square cutout size in pixels
@@ -166,7 +168,7 @@ reff_limit = 1.6
 
 
 # retrieve from the VOSpace and update the currently available tiles; takes some time to run
-update_tiles = True
+update_tiles = False
 # build kd tree with updated tiles otherwise use the already saved tree
 if update_tiles:
     build_new_kdtree = True
@@ -439,7 +441,7 @@ def input_to_tile_list(
 
 
 def download_worker(
-    download_queue, ready_queue, in_dict, download_dir, db_lock, shutdown_flag, queue_lock
+    database, download_queue, ready_queue, in_dict, download_dir, db_lock, shutdown_flag, queue_lock
 ):
     worker_id = threading.get_ident()
     while not shutdown_flag.is_set():
@@ -455,7 +457,7 @@ def download_worker(
                 'start_time': time.time(),
                 'status': 'downloading',
             }
-            update_tile_info(tile_info, db_lock)
+            update_tile_info(database, tile_info, db_lock)
 
             try:
                 tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp = tile_band_specs(
@@ -474,7 +476,7 @@ def download_worker(
                 tile_info['error_message'] = str(e)
             finally:
                 tile_info['end_time'] = time.time()
-                update_tile_info(tile_info, db_lock)
+                update_tile_info(database, tile_info, db_lock)
                 download_queue.task_done()
         except queue.Empty:
             continue
@@ -495,6 +497,8 @@ def process_tile_for_band(
     all_downloads_complete,
     shutdown_flag,
     queue_lock,
+    processed_in_current_run,
+    database,
 ):
     while (
         not (all_downloads_complete.is_set() and process_queue.empty())
@@ -526,7 +530,7 @@ def process_tile_for_band(
             'unmatched_dwarfs_count': 0,
         }
 
-        update_tile_info(tile_info, db_lock)
+        update_tile_info(database, tile_info, db_lock)
         logger.info(f'Started processing tile {tile_str(tile)}, band {band}.')
 
         try:
@@ -595,7 +599,10 @@ def process_tile_for_band(
         finally:
             tile_info['end_time'] = time.time()
 
-            update_tile_info(tile_info, db_lock)
+            update_tile_info(database, tile_info, db_lock)
+
+            with queue_lock:
+                processed_in_current_run[band] += 1
 
             logger.info(
                 f'Finished processing of tile {tile_str(tile)}, band {band}. '
@@ -640,9 +647,10 @@ def main(
     num_processing_cores,
     mem_track_inter,
     mem_aggr_period,
+    database,
 ):
     # Initialize the database for progress tracking
-    init_db()
+    init_db(database)
 
     # Initialize shutdown manager
     killer = GracefulKiller()
@@ -654,6 +662,9 @@ def main(
     db_lock = manager.Lock()
     queue_lock = manager.Lock()
     process_ids = manager.list()
+
+    # dictionary to keep track of processed tiles per band in current run
+    processed_in_current_run = manager.dict({band: 0 for band in band_dict.keys()})
 
     # Add main process ID
     process_ids.append(os.getpid())
@@ -697,27 +708,34 @@ def main(
             selected_all_tiles = [
                 [tile for tile in band_tiles if tile in tiles_x_bands] for band_tiles in all_tiles
             ]
-            availability = TileAvailability(selected_all_tiles, band_dict_incl, at_least_key)
+            availability = TileAvailability(selected_all_tiles, band_dict, at_least_key)
 
         unprocessed_jobs = get_unprocessed_jobs(
-            availability, process_band=anch_band, process_all_bands=process_all_avail
+            database=database,
+            tile_availability=availability,
+            process_band=anch_band,
+            process_all_bands=process_all_avail,
         )
-        total_jobs = len(unprocessed_jobs)
-        logger.info(f'Number of unprocessed jobs: {total_jobs}')
+        unprocessed_jobs_at_start = {band: 0 for band in band_dict.keys()}
+
         for job in unprocessed_jobs:
             logger.debug(f'Job: {job}')
+            unprocessed_jobs_at_start[job[1]] += 1
             download_queue.put(job)
+
+        logger.info(f'Number of unprocessed jobs: {unprocessed_jobs_at_start}')
 
         # Create an event to signal when all downloads are complete
         all_downloads_complete = multiprocessing.Event()
 
         # Start download threads
-        num_download_threads = min(num_processing_cores, total_jobs)  # Adjust as needed
+        num_download_threads = min(num_processing_cores, len(unprocessed_jobs))
         download_threads = []
         for _ in range(num_download_threads):
             t = threading.Thread(
                 target=download_worker,
                 args=(
+                    database,
                     download_queue,
                     process_queue,
                     band_dict,
@@ -731,10 +749,23 @@ def main(
             t.start()
             download_threads.append(t)
 
+        if process_all_avail:
+            bands_to_report = band_dict.keys()
+        else:
+            bands_to_report = [anch_band]
+
         # Start progress reporting thread
         progress_thread = threading.Thread(
             target=report_progress_and_memory,
-            args=(total_jobs, process_ids, shutdown_flag),
+            args=(
+                database,
+                availability,
+                bands_to_report,
+                unprocessed_jobs_at_start,
+                processed_in_current_run,
+                process_ids,
+                shutdown_flag,
+            ),
             daemon=True,
         )
         progress_thread.start()
@@ -758,6 +789,8 @@ def main(
                     all_downloads_complete,
                     shutdown_flag,
                     queue_lock,
+                    processed_in_current_run,
+                    database,
                 ),
             )
             p.start()
@@ -766,14 +799,34 @@ def main(
 
         all_jobs_completed = False
         while not killer.kill_now and not shutdown_flag.is_set():
-            total, completed, failed, in_progress, not_started = get_progress_summary(total_jobs)
-
-            logger.info(
-                f'Progress waiting: {completed}/{total} completed, {failed} failed, '
-                f'{in_progress} in progress, {not_started} not started'
+            progress_results = get_progress_summary(
+                database,
+                availability,
+                bands_to_report,
+                unprocessed_jobs_at_start,
+                processed_in_current_run,
             )
 
-            if completed + failed == total_jobs:
+            # Collect all log messages
+            log_messages = []
+            for band in bands_to_report:
+                stats = progress_results[band]
+                log_messages.append(f'\nProgress for band {band}:')
+                log_messages.append(
+                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed"
+                )
+                log_messages.append(
+                    f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['remaining_in_run']} remaining"
+                )
+
+            # Log all messages together
+            logger.info('\n'.join(log_messages))
+
+            if all(
+                progress_results[band]['in_progress'] == 0
+                and progress_results[band]['remaining_in_run'] == 0
+                for band in bands_to_report
+            ):
                 if not all_jobs_completed:
                     logger.info('All jobs completed. Initiating shutdown.')
                     all_jobs_completed = True
@@ -847,7 +900,13 @@ def main(
             logger.warning('No memory usage data was collected.')
 
         # Generate and log summary report
-        summary_report = generate_summary_report(total_jobs)
+        summary_report = generate_summary_report(
+            database,
+            availability,
+            bands_to_report,
+            unprocessed_jobs_at_start,
+            processed_in_current_run,
+        )
         logger.info(summary_report)
 
 
@@ -894,6 +953,12 @@ if __name__ == '__main__':
         default=3600,
         help='Period in seconds for aggregating memory statistics (default: 3600)',
     )
+    parser.add_argument(
+        '--database',
+        type=str,
+        default='progress.db',
+        help='Database file to keep track of progress (default: progress.db)',
+    )
     args = parser.parse_args()
 
     # define the arguments for the main function
@@ -922,6 +987,7 @@ if __name__ == '__main__':
         'num_processing_cores': args.processing_cores,
         'mem_track_inter': args.memory_tracking_interval,
         'mem_aggr_period': args.memory_aggregation_period,
+        'database': args.database,
     }
 
     start = time.time()
