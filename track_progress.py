@@ -12,7 +12,7 @@ from logging_setup import get_logger
 
 logger = get_logger()
 
-from utils import extract_tile_numbers_from_job  # noqa: E402
+from utils import extract_tile_numbers_from_job, get_dwarf_tile_list  # noqa: E402
 
 
 def init_db(database):
@@ -34,7 +34,14 @@ def init_db(database):
     conn.close()
 
 
-def get_unprocessed_jobs(database, tile_availability, process_band=None, process_all_bands=False):
+def get_unprocessed_jobs(
+    database,
+    tile_availability,
+    dwarf_df,
+    process_band=None,
+    process_all_bands=False,
+    only_known_dwarfs=False,
+):
     conn = sqlite3.connect(database)
     c = conn.cursor()
 
@@ -45,6 +52,10 @@ def get_unprocessed_jobs(database, tile_availability, process_band=None, process
     else:
         tiles_to_process = tile_availability.unique_tiles
 
+    if only_known_dwarfs:
+        tiles_with_dwarfs = get_dwarf_tile_list(dwarf_df)
+        tiles_to_process = [tile for tile in tiles_to_process if tile in tiles_with_dwarfs]
+        print(f'Tiles with dwarfs in r: {len(tiles_to_process)}')
     # test_tiles = [
     #     (np.int64(0), np.int64(227)),
     #     (np.int64(0), np.int64(228)),
@@ -62,17 +73,22 @@ def get_unprocessed_jobs(database, tile_availability, process_band=None, process
         for band in available_bands:
             if process_band and not process_all_bands and band != process_band:
                 continue
-            c.execute(
-                """
-                SELECT status 
-                FROM processed_tiles 
-                WHERE tile_id = ? AND band = ?
-            """,
-                (str(tile), band),
-            )
-            result = c.fetchone()
-            if result is None or result[0] != 'completed':
+
+            if only_known_dwarfs:
+                # If processing only known dwarfs, add all tiles regardless of database status
                 unprocessed.append((tile, band))
+            else:
+                c.execute(
+                    """
+                    SELECT status 
+                    FROM processed_tiles 
+                    WHERE tile_id = ? AND band = ?
+                """,
+                    (str(tile), band),
+                )
+                result = c.fetchone()
+                if result is None or result[0] != 'completed':
+                    unprocessed.append((tile, band))
 
     conn.close()
     return unprocessed
@@ -130,7 +146,8 @@ def get_progress_summary(
             SELECT 
                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress
+                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress,
+                SUM(CASE WHEN status = 'download_failed' THEN 1 ELSE 0 END) as download_failed
             FROM processed_tiles
             WHERE band = ?
         """,
@@ -138,10 +155,11 @@ def get_progress_summary(
         )
 
         result = c.fetchone()
-        total_completed, total_failed, in_progress = (
+        total_completed, total_failed, in_progress, download_failed = (
             result[0] or 0,
             result[1] or 0,
             result[2] or 0,
+            result[3] or 0,
         )
 
         # Get processed count for the current run
@@ -155,6 +173,7 @@ def get_progress_summary(
             'total_completed': total_completed,
             'total_failed': total_failed,
             'in_progress': in_progress,
+            'download_failed': download_failed,
             'current_run_processed': current_run_processed,
             'remaining_in_run': remaining_in_run,
         }
@@ -339,6 +358,9 @@ def generate_summary_report(
     total_completed = sum(progress_results[band]['total_completed'] for band in bands_to_report)
     total_failed = sum(progress_results[band]['total_failed'] for band in bands_to_report)
     total_in_progress = sum(progress_results[band]['in_progress'] for band in bands_to_report)
+    total_download_failed = sum(
+        progress_results[band]['download_failed'] for band in bands_to_report
+    )
     total_remaining = sum(progress_results[band]['remaining_in_run'] for band in bands_to_report)
 
     c.execute(
@@ -366,6 +388,7 @@ def generate_summary_report(
     Total Jobs: {total_jobs}
     Completed: {total_completed}
     Failed: {total_failed}
+    Download Failed: {total_download_failed}
     In Progress: {total_in_progress}
     Remaining: {total_remaining}
     Average Processing Time: {avg_time_str}
@@ -381,6 +404,7 @@ def generate_summary_report(
         Total Available: {stats['total_available']}
         Completed: {stats['total_completed']}
         Failed: {stats['total_failed']}
+        Download Failed: {stats['download_failed']}
         In Progress: {stats['in_progress']}
         Remaining in Run: {stats['remaining_in_run']}
         """
@@ -421,7 +445,7 @@ def report_progress_and_memory(
                 stats = progress_results[band]
                 log_messages.append(f'\nProgress for band {band}:')
                 log_messages.append(
-                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed"
+                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed"
                 )
                 log_messages.append(
                     f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['remaining_in_run']} remaining"

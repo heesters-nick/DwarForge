@@ -7,7 +7,8 @@ from astropy.coordinates import SkyCoord
 from scipy.spatial import cKDTree
 
 from logging_setup import get_logger
-from utils import check_objects_in_neighboring_tiles, tile_str
+from preprocess import open_fits
+from utils import check_corrupted_data, check_objects_in_neighboring_tiles, tile_str
 from warning_manager import set_warnings
 
 logger = get_logger()
@@ -216,14 +217,17 @@ def match_cats(df_det, df_label, tile, header, max_sep=15.0):
     return list(det_match_idx), label_matches, label_unmatches, det_matches
 
 
-def add_labels(tile, band, det_df, det_df_full, dwarfs_df, header):
+def add_labels(tile, band, det_df, det_df_full, dwarfs_df, fits_path, fits_ext, header):
     logger.debug(f'Adding labels to det params for tile {tile_str(tile)}.')
 
     warnings = []
+    corrupted_data_objects = []
 
     det_df_updated = det_df.copy()
     dwarfs_in_tile = dwarfs_df[dwarfs_df['tile'] == tile_str(tile)].reset_index(drop=True)
+
     logger.info(f'Known dwarfs in tile {tile_str(tile)}: {len(dwarfs_in_tile)}')
+
     # Check for objects in neighboring tiles
     additional_dwarfs = check_objects_in_neighboring_tiles(tile_str(tile), dwarfs_df, header)
     if not additional_dwarfs.empty:
@@ -261,53 +265,81 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df, header):
         )
 
     if len(lsb_unmatches) > 0:
-        warning_msg = f'Found {len(lsb_unmatches)} unmatched dwarf for tile: {tile_str(tile)}.'
-        logger.warning(warning_msg)
-        warnings.append(warning_msg)
-        # Check unfiltered dataframe for known objects that were filtered out
-        _, full_lsb_matches, full_lsb_unmatches, full_det_matches = match_cats(
-            det_df_full, lsb_unmatches, tile, header, max_sep=15.0
-        )
+        data, header = open_fits(fits_path, fits_ext=0)
+        non_corrupted_unmatches = []
 
-        if len(full_lsb_matches) > 0:
-            matching_stats['matched_dwarfs_count'] += len(full_lsb_matches)
-            warning_msg = f'Found {len(full_lsb_matches)} known dwarf(s) that was/were filtered out in tile {tile_str(tile)} in band {band}.'
-            logger.warning(warning_msg)
-
-            # Create a new dataframe with the filtered out detections
-            new_rows = full_det_matches.copy()
-            new_rows['lsb'] = 1
-            new_rows['ID_known'] = full_lsb_matches['ID'].values
-
-            # Concatenate the new rows to det_df_updated
-            det_df_updated = pd.concat([det_df_updated, new_rows], ignore_index=True)
-
-            warning_msg = (
-                f"Added back {len(new_rows)} known dwarf(s) that was/were initially filtered out in\n\t"
-                f"tile: {tile_str(tile)}\n\t"
-                f"band: {band}:\n\t"
-                f"ID: {new_rows['ID_known'].values}\n\t"
-                f"mu: {[f'{mu:.3f}' for mu in new_rows['mu'].values]}\n\t"
-                f"r_eff: {[f'{re:.3f}' for re in new_rows['re_arcsec'].values]}\n\t"
-                f"ra: {new_rows['ra'].values}\n\t"
-                f"dec: {new_rows['dec'].values}\t"
+        for _, unmatched_obj in lsb_unmatches.iterrows():
+            is_corrupted = check_corrupted_data(
+                data, header, unmatched_obj['ra'], unmatched_obj['dec']
             )
+            if is_corrupted:
+                corrupted_data_objects.append(unmatched_obj['ID'])
+            else:
+                non_corrupted_unmatches.append(unmatched_obj)
+
+        non_corrupted_unmatches = pd.DataFrame(non_corrupted_unmatches)
+        matching_stats['corrupted_data_count'] = len(corrupted_data_objects)
+
+        if len(corrupted_data_objects) > 0:
+            logger.info(
+                f'{len(corrupted_data_objects)}/{len(lsb_unmatches)} unmatched dwarfs are in corrupted data regions.'
+            )
+
+        if len(non_corrupted_unmatches) > 0:
+            warning_msg = f'Found {len(non_corrupted_unmatches)} unmatched dwarf(s) for tile: {tile_str(tile)} (excluding corrupted data regions).'
             logger.warning(warning_msg)
             warnings.append(warning_msg)
-
-        matching_stats['unmatched_dwarfs_count'] = len(full_lsb_unmatches)
-
-        if len(full_lsb_unmatches) > 0:
-            warning_msg = (
-                f"Found {len(full_lsb_unmatches)} undetected but known dwarfs in\n\t"
-                f"tile: {tile_str(tile)}\n\t"
-                f"band: {band}\n\t"
-                f"ID(s): {full_lsb_unmatches['ID'].values}\n\t"
-                f"ra: {full_lsb_unmatches['ra'].values}\n\t"
-                f"dec: {full_lsb_unmatches['dec'].values}\n\t"
+            # Check unfiltered dataframe for known objects that were filtered out
+            _, full_lsb_matches, full_lsb_unmatches, full_det_matches = match_cats(
+                det_df_full, lsb_unmatches, tile, header, max_sep=15.0
             )
-            logger.warning(warning_msg)
-            warnings.append(warning_msg)
+
+            if len(full_lsb_matches) > 0:
+                matching_stats['matched_dwarfs_count'] += len(full_lsb_matches)
+                warning_msg = f'Found {len(full_lsb_matches)} known dwarf(s) that was/were filtered out in tile {tile_str(tile)} in band {band}.'
+                logger.warning(warning_msg)
+
+                # Create a new dataframe with the filtered out detections
+                new_rows = full_det_matches.copy()
+                new_rows['lsb'] = 1
+                new_rows['ID_known'] = full_lsb_matches['ID'].values
+
+                # Concatenate the new rows to det_df_updated
+                det_df_updated = pd.concat([det_df_updated, new_rows], ignore_index=True)
+
+                warning_msg = (
+                    f"Added back {len(new_rows)} known dwarf(s) that was/were initially filtered out in\n\t"
+                    f"tile: {tile_str(tile)}\n\t"
+                    f"band: {band}:\n\t"
+                    f"ID: {new_rows['ID_known'].values}\n\t"
+                    f"mu: {[f'{mu:.3f}' for mu in new_rows['mu'].values]}\n\t"
+                    f"r_eff: {[f'{re:.3f}' for re in new_rows['re_arcsec'].values]}\n\t"
+                    f"ra: {new_rows['ra'].values}\n\t"
+                    f"dec: {new_rows['dec'].values}\t"
+                )
+                logger.warning(warning_msg)
+                warnings.append(warning_msg)
+
+            matching_stats['unmatched_dwarfs_count'] = len(full_lsb_unmatches) + len(
+                corrupted_data_objects
+            )
+
+            if len(full_lsb_unmatches) > 0:
+                warning_msg = (
+                    f"Found {len(full_lsb_unmatches)} undetected but known dwarfs in\n\t"
+                    f"tile: {tile_str(tile)}\n\t"
+                    f"band: {band}\n\t"
+                    f"ID(s): {full_lsb_unmatches['ID'].values}\n\t"
+                    f"ra: {full_lsb_unmatches['ra'].values}\n\t"
+                    f"dec: {full_lsb_unmatches['dec'].values}\n\t"
+                )
+                logger.warning(warning_msg)
+                warnings.append(warning_msg)
+        else:
+            matching_stats['unmatched_dwarfs_count'] = len(corrupted_data_objects)
+            logger.info(
+                f'All {len(corrupted_data_objects)} unmatched dwarfs are in corrupted data regions.'
+            )
 
     set_warnings(warnings)
 

@@ -156,9 +156,11 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'whigs-g'
+anchor_band = 'cfis_lsb-r'
 # process all available tiles
 process_all_available = False
+# process only tiles with known dwarfs
+process_only_known_dwarfs = True
 # define the square cutout size in pixels
 cutout_size = 224
 # minimum surface brightness to select objects
@@ -441,7 +443,15 @@ def input_to_tile_list(
 
 
 def download_worker(
-    database, download_queue, ready_queue, in_dict, download_dir, db_lock, shutdown_flag, queue_lock
+    database,
+    download_queue,
+    ready_queue,
+    in_dict,
+    download_dir,
+    db_lock,
+    shutdown_flag,
+    queue_lock,
+    processed_in_current_run,
 ):
     worker_id = threading.get_ident()
     while not shutdown_flag.is_set():
@@ -471,9 +481,13 @@ def download_worker(
                     tile_info['status'] = 'ready_for_processing'
                 else:
                     tile_info['status'] = 'download_failed'
+                    with queue_lock:
+                        processed_in_current_run[band] += 1
             except Exception as e:
                 tile_info['status'] = 'download_failed'
                 tile_info['error_message'] = str(e)
+                with queue_lock:
+                    processed_in_current_run[band] += 1
             finally:
                 tile_info['end_time'] = time.time()
                 update_tile_info(database, tile_info, db_lock)
@@ -550,10 +564,6 @@ def process_tile_for_band(
                 param_path, header=prepped_header, zp=zp, mu_min=21.0, reff_min=1.4
             )
 
-            # save filtered MTO detections
-            mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
-            mto_all.to_csv(param_path, index=False)
-
             # Match detections with catalog
             if input_catalog is not None:
                 clear_warnings()
@@ -563,6 +573,8 @@ def process_tile_for_band(
                     det_df=mto_det,
                     det_df_full=mto_all,
                     dwarfs_df=input_catalog,
+                    fits_path=prepped_path,
+                    fits_ext=fits_ext,
                     header=prepped_header,
                 )
                 tile_info.update(matching_stats)
@@ -571,6 +583,10 @@ def process_tile_for_band(
                 if match_warnings:
                     tile_info['status'] = 'failed'
                     tile_info['error_message'] = '\n\t'.join(match_warnings)
+
+            # save filtered MTO detections
+            mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
+            mto_all.to_csv(param_path, index=False)
 
             tile_info['detection_count'] = len(mto_det)
 
@@ -643,6 +659,7 @@ def main(
     download_dir,
     anch_band,
     process_all_avail,
+    only_known_dwarfs,
     catalog_path,
     num_processing_cores,
     mem_track_inter,
@@ -713,8 +730,10 @@ def main(
         unprocessed_jobs = get_unprocessed_jobs(
             database=database,
             tile_availability=availability,
+            dwarf_df=input_catalog,
             process_band=anch_band,
             process_all_bands=process_all_avail,
+            only_known_dwarfs=only_known_dwarfs,
         )
         unprocessed_jobs_at_start = {band: 0 for band in band_dict.keys()}
 
@@ -743,6 +762,7 @@ def main(
                     db_lock,
                     shutdown_flag,
                     queue_lock,
+                    processed_in_current_run,
                 ),
             )
             t.daemon = True
@@ -813,7 +833,7 @@ def main(
                 stats = progress_results[band]
                 log_messages.append(f'\nProgress for band {band}:')
                 log_messages.append(
-                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed"
+                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed"
                 )
                 log_messages.append(
                     f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['remaining_in_run']} remaining"
@@ -983,6 +1003,7 @@ if __name__ == '__main__':
         'download_dir': download_directory,
         'anch_band': anchor_band,
         'process_all_avail': process_all_available,
+        'only_known_dwarfs': process_only_known_dwarfs,
         'catalog_path': dwarf_catalog,
         'num_processing_cores': args.processing_cores,
         'mem_track_inter': args.memory_tracking_interval,

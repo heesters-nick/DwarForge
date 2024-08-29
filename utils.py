@@ -17,6 +17,7 @@ from photutils.background import Background2D
 from sklearn.decomposition import PCA
 from vos import Client
 
+from detect import detect_anomaly
 from logging_setup import get_logger
 
 client = Client()
@@ -455,3 +456,70 @@ def check_objects_in_neighboring_tiles(tile, dwarfs_df, header):
     ]
 
     return dwarfs_in_current_tile
+
+
+def get_dwarf_tile_list(dwarf_cat):
+    tiles = dwarf_cat['tile'].values
+    non_nan_tiles = [x for x in tiles if x is not np.nan]
+    str_to_tuple = [ast.literal_eval(item) for item in non_nan_tiles]
+    unique_tiles = set(str_to_tuple)
+    return unique_tiles
+
+
+def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
+    """
+    Check if the data around a specific coordinate is corrupted.
+
+    This function examines a square region around the given coordinates in a FITS image
+    and determines if the data is likely corrupted. First anomalies are detected and replaced
+    with zeros then the fraction of zero-value pixels determines the corruption flag.
+
+    Args:
+        data (numpy.ndarray): fits image data
+        header (header): fits header
+        ra (float): Right Ascension of the object in degrees.
+        dec (float): Declination of the object in degrees.
+        radius_arcsec (float, optional): Radius around the object to check, in arcseconds. Defaults to 15.0.
+
+    Returns:
+        bool: True if the data is likely corrupted (mostly zeros), False otherwise.
+
+    Raises:
+        ValueError: If the WCS information cannot be extracted from the FITS header.
+    """
+    # replace data anomalies with zeros
+    data = detect_anomaly(data, replace_anomaly=True)
+    # replace nan values with zeros
+    data[np.isnan(data)] = 0.0
+    # replace highly negative values with zeros
+    data[data < -9.0] = 0.0
+
+    wcs = WCS(header)
+
+    if wcs is None:
+        raise ValueError('Unable to extract WCS information from the FITS header.')
+
+    # Convert sky coordinates to pixel coordinates
+    x, y = wcs.all_world2pix(ra, dec, 0)
+    x, y = int(x), int(y)
+
+    # Calculate pixel scale and radius in pixels
+    if 'CDELT1' in header:
+        pixel_scale = abs(header['CDELT1']) * 3600  # arcsec/pixel
+    elif 'CD1_1' in header:
+        pixel_scale = abs(header['CD1_1']) * 3600  # arcsec/pixel
+    else:
+        raise ValueError('Unable to determine pixel scale from FITS header.')
+
+    radius_pixels = int(radius_arcsec / pixel_scale)
+
+    # Extract the region around the coordinate
+    y_min = max(0, y - radius_pixels)
+    y_max = min(data.shape[0], y + radius_pixels + 1)
+    x_min = max(0, x - radius_pixels)
+    x_max = min(data.shape[1], x + radius_pixels + 1)
+    region = data[y_min:y_max, x_min:x_max]
+
+    # Check if more than 90% of the pixels are zero
+    zero_fraction = np.sum(region == 0) / region.size
+    return zero_fraction > 0.8
