@@ -549,7 +549,9 @@ def process_tile_for_band(
 
         try:
             # Preprocess (bin)
-            prepped_path, prepped_header = prep_tile(final_path, fits_ext, zp, bin_size=4)
+            prepped_data, prepped_path, prepped_header = prep_tile(
+                tile, final_path, fits_ext, zp, bin_size=4
+            )
 
             # Run detection
             param_path = run_mto(

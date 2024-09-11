@@ -8,20 +8,23 @@ from astride import Streak
 from astropy.convolution import Gaussian2DKernel, convolve
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
-from astropy.stats import gaussian_fwhm_to_sigma
+from astropy.stats import SigmaClip, gaussian_fwhm_to_sigma, sigma_clipped_stats
 from astropy.wcs import WCS
-from matplotlib import pyplot as plt
+from photutils.background import Background2D, MedianBackground
 from PIL import Image, ImageDraw
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, label
 
+from detect import detect_anomaly
 from logging_setup import get_logger
 from utils import (
+    delete_file,
     func_PCA,
-    get_background,
+    generate_positive_trunc_normal,
     piecewise_function_with_break_global,
     piecewise_linear,
     power_law,
     query_gaia_stars,
+    tile_str,
 )
 
 logger = get_logger()
@@ -47,280 +50,341 @@ def open_fits(file_path, fits_ext):
     return data, header
 
 
-def find_stars(file_path, tile_dim, coord, search_radius, wcs):
+def remove_background(
+    image, header, file_path, bw=200, bh=200, estimator=MedianBackground(), save_file=False
+):
+    sigma_clip = SigmaClip(sigma=3.0)
+    bkg_estimator = estimator
+    bkg = Background2D(
+        image, (bw, bh), filter_size=(3, 3), sigma_clip=sigma_clip, bkg_estimator=bkg_estimator
+    )
+    data_sub = image - bkg.background
+
+    if save_file:
+        directory, filename = os.path.split(file_path)
+        # Split the filename into name and extension
+        name, extension = os.path.splitext(filename)
+        # Create the new filename
+        new_filename = f'{name}_bkg_sub{extension}'
+        # Combine the directory and new filename
+        out_path = os.path.join(directory, new_filename)
+        # Create a new HDU with the rebinned data and updated header
+        new_hdu = fits.PrimaryHDU(data=data_sub, header=header)
+        # save new fits file
+        new_hdu.writeto(out_path, overwrite=True)
+    else:
+        out_path = None
+
+    return data_sub, bkg, out_path
+
+
+def replace_with_local_background(
+    data, star_df, bright_star_mask, r_scale, l_scale, bkg, bkg_factor, embedded_threshold=0.9
+):
+    h, w = data.shape
+    result = data.copy()
+    total_stars = len(star_df)
+    skipped_stars = 0
+
+    bright_star_mask = bright_star_mask.astype(np.uint8)
+    replaced_stars_mask = np.zeros_like(bright_star_mask, dtype=np.uint8)
+
+    visualization_mask = np.zeros((h, w, 3), dtype=np.uint8)
+
+    def create_annular_segments(
+        shape, center, inner_r, outer_r, spike_len, spike_thick, n_segments=4
+    ):
+        y, x = center
+        mask = np.zeros(shape, dtype=np.uint8)
+
+        yy, xx = np.ogrid[: shape[0], : shape[1]]
+        distances = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
+
+        # Use arctan2 for full 360-degree angle range
+        angles = np.arctan2(yy - y, xx - x)
+        # Shift angles to be in [0, 2π) range
+        angles = (angles + 2 * np.pi) % (2 * np.pi)
+        # set annulus extend
+        annulus_extend = max(int(np.round(outer_r / 2)) + 2, spike_len + 1)
+        # define annulus mask
+        annulus = (distances >= inner_r + 1) & (distances <= annulus_extend)
+
+        segment_size = 2 * np.pi / n_segments
+        for i in range(n_segments):
+            start_angle = i * segment_size
+            end_angle = (i + 1) * segment_size
+
+            # Handle the case where the segment crosses the 0/2π boundary
+            if start_angle < end_angle:
+                segment = (angles >= start_angle) & (angles < end_angle)
+            else:
+                segment = (angles >= start_angle) | (angles < end_angle)
+
+            mask[(annulus & segment)] = 255
+
+        # Remove diffraction spike areas
+        spike_mask = np.zeros(shape, dtype=np.uint8)
+        cv2.drawMarker(
+            spike_mask,
+            (x, y),
+            color=255,
+            markerType=cv2.MARKER_CROSS,
+            markerSize=spike_len,
+            thickness=spike_thick,
+        )
+        mask[spike_mask > 0] = 0
+
+        return mask
+
+    for _, star in star_df.iterrows():
+        y, x = np.round(star.y).astype(np.int32), np.round(star.x).astype(np.int32)
+        r = max(np.round(star.R_ISO * r_scale).astype(np.int32), 1)
+        spike_len = int(np.round(star.diffs_len_fit * l_scale))
+        spike_thick = max(1, int(np.round(star.diffs_thick_fit)))
+
+        outer_r = max(r + 7, spike_len + 2)  # Ensure we capture enough background
+
+        y_min, y_max = max(0, y - outer_r), min(h, y + outer_r + 1)
+        x_min, x_max = max(0, x - outer_r), min(w, x + outer_r + 1)
+        local_region = result[y_min:y_max, x_min:x_max]
+        local_y, local_x = y - y_min, x - x_min
+
+        # Create star region mask including diffraction spikes
+        star_region = np.zeros_like(local_region, dtype=np.uint8)
+        cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)
+        if spike_len > 0:
+            cv2.drawMarker(
+                star_region,
+                (local_x, local_y),
+                color=255,
+                markerType=cv2.MARKER_CROSS,
+                markerSize=spike_len,
+                thickness=spike_thick,
+            )
+
+        # Check if star is embedded
+        check_annulus = cv2.circle(
+            np.zeros_like(local_region, dtype=np.uint8), (local_x, local_y), r + 2, 255, 1
+        )
+        check_pixels = local_region[check_annulus > 0]
+        median_background = bkg.background_median
+        rms_background = bkg.background_rms_median
+        is_embedded = (
+            np.sum(check_pixels > max(1, bkg_factor * rms_background + median_background))
+            / len(check_pixels)
+            >= embedded_threshold
+        )
+        #         is_embedded = np.sum(check_pixels > max(1, bkg_factor*median_background)) / len(check_pixels) >= embedded_threshold
+
+        if is_embedded:
+            r_reduced = max(int(np.round(r * 0.5)), 1)
+            l_reduced = spike_len
+            star_region_reduced = np.zeros_like(local_region, dtype=np.uint8)
+            cv2.circle(
+                star_region_reduced, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA
+            )
+            if spike_len > 0:
+                l_reduced = max(int(np.round(spike_len * 0.4)), 1)
+                cv2.drawMarker(
+                    star_region_reduced,
+                    (local_x, local_y),
+                    color=255,
+                    markerType=cv2.MARKER_CROSS,
+                    markerSize=l_reduced,
+                    thickness=spike_thick,
+                )
+
+            # Create a narrow annulus around the reduced star region for background estimation
+            inner_r_bg = r_reduced
+            outer_r_bg = l_reduced  # Up to reduced length of diffraction spikes
+            bg_segments = create_annular_segments(
+                local_region.shape,
+                (local_y, local_x),
+                inner_r_bg,
+                outer_r_bg,
+                l_reduced,
+                spike_thick,
+            )
+        else:
+            star_region_reduced = star_region
+            # Use the original background estimation for non-embedded stars
+            bg_segments = create_annular_segments(
+                local_region.shape, (local_y, local_x), r, outer_r, spike_len, spike_thick
+            )
+
+        # Exclude all stars (bright and dim) from the background segments
+        local_bright_star_mask = bright_star_mask[y_min:y_max, x_min:x_max]
+        bg_segments[local_bright_star_mask > 0] = 0
+
+        visualization_mask[y_min:y_max, x_min:x_max, 0] |= (
+            star_region_reduced  # Red for star region
+        )
+        visualization_mask[y_min:y_max, x_min:x_max, 1] |= (
+            bg_segments  # Green for background segments
+        )
+
+        if np.any((star_region_reduced > 0) & (local_bright_star_mask > 0)):
+            skipped_stars += 1
+            continue
+
+        bg_data = local_region[bg_segments > 0]
+
+        if len(bg_data) == 0 or np.count_nonzero(np.isnan(bg_data)) / len(bg_data) > 0.9:
+            skipped_stars += 1
+            continue
+
+        mean, median, std = sigma_clipped_stats(bg_data, sigma=3.0)
+
+        num_pixels = np.sum(star_region_reduced > 0)
+        if is_embedded:
+            # For embedded stars, use a more conservative approach
+            random_values = generate_positive_trunc_normal(
+                bg_data, median, min(std, 3.0), num_pixels
+            )
+        else:
+            random_values = np.random.normal(median, min(std, 3.0), num_pixels)
+
+        local_result = local_region.copy()
+        local_result[star_region_reduced > 0] = random_values
+
+        result[y_min:y_max, x_min:x_max] = local_result
+
+        replaced_stars_mask[y_min:y_max, x_min:x_max] |= star_region_reduced
+
+    logger.debug(f'Skipped {skipped_stars}/{total_stars} stars.')
+    return result, replaced_stars_mask.astype(bool), visualization_mask
+
+
+def find_stars(tile, header):
     """
     Find stars within a given search radius around a specific coordinate.
 
     Args:
-        file_path (str): Path to the fits file.
-        tile_dim (tuple): Dimensions of the tile.
-        coord (SkyCoord): Coordinate around which to search for stars.
-        search_radius (float): Radius within which to search for stars.
-        wcs (WCS): World Coordinate System object.
+        tile (str): tile numbers
+        header (header): fits header
 
     Returns:
     - star_df (DataFrame): DataFrame containing information about the stars found in and around the field.
     """
-    logger.info(f'Querying Gaia for tile {os.path.basename(file_path)}..')
-    star_df = query_gaia_stars(coord, search_radius)
+    wcs = WCS(header)
+    pixel_scale = abs(header['CD1_1'] * 3600)
+    tile_width, tile_height = header['NAXIS1'], header['NAXIS2']
+    dim_x_arcsec = tile_width * pixel_scale
+    dim_y_arcsec = tile_height * pixel_scale
+    tile_coord = SkyCoord(ra=header['CRVAL1'], dec=header['CRVAL2'], unit='deg', frame='icrs')
+    # extend search radius to include stars that are just outside the field
+    search_radius = np.sqrt(dim_x_arcsec**2 + dim_y_arcsec**2) / 2 + 200
+    #     print(f'search_radius: {search_radius} arcsec')
+
+    print(f'Querying Gaia for tile {tile}..')
+    star_df = query_gaia_stars(tile_coord, search_radius)
+    star_df.dropna(inplace=True)
     if star_df.empty:
-        logger.info(f'No stars found in tile {os.path.basename(file_path)}.')
+        print(f'No stars found in tile {tile}.')
         return star_df
     c_star = SkyCoord(ra=star_df.ra, dec=star_df.dec, unit='deg', frame='icrs')
     x_star, y_star = wcs.world_to_pixel(c_star)
 
-    mask = (
-        (-700 < x_star)
-        & (x_star < (tile_dim[1] + 700))
-        & (-700 < y_star)
-        & (y_star < (tile_dim[0] + 700))
-    )
+    mask = (0 < x_star) & (x_star < tile_width) & (0 < y_star) & (y_star < tile_height)
 
     star_df = star_df[mask].reset_index(drop=True)
     star_df['x'], star_df['y'] = x_star[mask], y_star[mask]
-    logger.info(f'Stars found in tile {os.path.basename(file_path)}.')
+    print(f'{len(star_df)} stars found in tile {tile}.')
 
     return star_df
 
 
-def star_fit(df, survey=None, with_plot=False, folder=None):
-    """
-    Fits star size, diffraction spike length, and thickness to its Gaia G-band magnitude.
-
-    Args:
-        df (DataFrame): Input DataFrame for stars in and around the field.
-        survey (str, optional): Survey name ('UNIONS', 'DECALS', or 'LBT').
-        with_plot (bool, optional): Whether to generate and save plots. Defaults to False.
-        folder (str, optional): Path to the folder where the output plots will be saved.
-
-    Returns:
-        df (DataFrame): Updated DataFrame for stars in and around the field.
-    """
+def star_fit(df_if, survey='UNIONS'):
+    df = df_if.copy()
     # fit star size
-    # use UNIONS parameters as default
-    break_point_s = 9.49
-    param_s = np.array([7.21366775e05, 6.13780414e-01, 1.26614049e02, 8.26137977e05])
-    df['A'] = piecewise_function_with_break_global(np.array(df.Gmag), break_point_s, *param_s)
-    df['R_ISO'] = np.sqrt(df.A / np.pi)
-
     if survey == 'UNIONS':
         param_s = np.array([7.21366775e05, 6.13780414e-01, 1.26614049e02, 8.26137977e05])
         break_point_s = 9.49
-        df['A'] = piecewise_function_with_break_global(np.array(df.Gmag), break_point_s, *param_s)
+        df['A'] = piecewise_function_with_break_global(np.array(df.Gmag), *param_s, break_point_s)
         df['R_ISO'] = np.sqrt(df.A / np.pi)
     if survey == 'DECALS':
         param_s = np.array([1.40400983e-02, 4.94599527e00, -2.24130151e02])
-        df['A'] = power_law(np.array(df.Gmag), *param_s)
-        df['R_ISO'] = np.sqrt(df.A / np.pi)
-    if survey == 'LBT':
-        param_s = np.array([7.21366775e05, 6.13780414e-01, 1.26614049e02, 8.26137977e05])
-        break_point_s = 9.49
-        df['A'] = piecewise_function_with_break_global(np.array(df.Gmag), break_point_s, *param_s)
-        df['R_ISO'] = np.sqrt(df.A / np.pi)
+        df['A'] = power_law(np.array(df_if.Gmag), *param_s)
+        df['R_ISO'] = np.sqrt(df_if.A / np.pi)
 
     # fit length of diffraction spikes
     param_l = np.array([1.36306644e03, 3.45428885e-01, 3.30158864e00, 1.09029943e03])
     break_point_l = 15.29
-    df['diffs_len_fit'] = piecewise_function_with_break_global(df['Gmag'], break_point_l, *param_l)
-    df['diffs_len_fit'] = piecewise_function_with_break_global(df['Gmag'], break_point_l, *param_l)
+    df['diffs_len_fit'] = piecewise_function_with_break_global(df['Gmag'], *param_l, break_point_l)
 
     # fit thickness of diffraction spikes
     param_t = np.array([15.6, -0.5, -0.05, 1.5])
     df['diffs_thick_fit'] = piecewise_linear(df['Gmag'], *param_t)
-    df['diffs_thick_fit'] = piecewise_linear(df['Gmag'], *param_t)
-
-    if with_plot and folder is not None:
-        # star size
-        plt.figure(figsize=(10, 10))
-        x = np.arange(6, 21.4, 0.1)
-        plt.scatter(
-            np.array(df.Gmag),
-            np.array(df.npix),
-            marker='o',
-            s=10,
-            edgecolor='blue',
-            facecolor='None',
-            label='Stars in the field.',
-        )
-        plt.ylim([0, 50000])
-        plt.plot(
-            x,
-            piecewise_function_with_break_global(x, break_point_s, *param_s),
-            label=f'Curve fit: piecewise function with a break at {break_point_s}',
-        )
-        plt.xlabel('Gmag (Gaia)', fontsize=15)
-        plt.ylabel('npix', fontsize=15)
-        plt.legend(fontsize=15)
-        plt.savefig(folder + 'star_size_global_fit.png', dpi=300)
-
-        # length of diffraction spikes
-        plt.figure(figsize=(10, 10))
-        x = np.arange(6, 21.4, 0.1)
-        plt.scatter(
-            np.array(df.Gmag),
-            np.array(df.diffs_len),
-            marker='o',
-            s=10,
-            edgecolor='blue',
-            facecolor='None',
-            label='Stars in the field.',
-        )
-        plt.ylim([0, 2000])
-        plt.plot(
-            x,
-            piecewise_function_with_break_global(x, break_point_l, *param_l),
-            label='Curve fit: piecewise function with a break at {}.'.format(break_point_l),
-        )
-        plt.xlabel('Gmag (Gaia)', fontsize=15)
-        plt.ylabel('diffs_len', fontsize=15)
-        plt.legend(fontsize=15)
-        plt.savefig(folder + 'star_len_global_fit.png', dpi=300)
-
-        # thickness of diffraction spikes
-        plt.figure(figsize=(10, 10))
-        x = np.arange(6, 21.4, 0.1)
-        plt.scatter(
-            np.array(df.Gmag),
-            np.array(df.avg_thickness),
-            marker='o',
-            s=10,
-            edgecolor='blue',
-            facecolor='None',
-            label='Stars in the field.',
-        )
-        plt.ylim([0, 8])
-        plt.plot(
-            x,
-            piecewise_linear(x, *param_t),
-            label='Curve fit: piecewise linear function.',
-        )
-        plt.xlabel('Gmag (Gaia)', fontsize=15)
-        plt.ylabel('diffs_thick', fontsize=15)
-        plt.legend(fontsize=15)
-        plt.savefig(folder + 'star_thick_global_fit.png', dpi=300)
 
     return df
 
 
-def star_mask(file_path, data, header, folder=None, survey=None):
-    """
-    Mask stars in the field.
+def mask_stars(
+    tile_str,
+    data,
+    header,
+    file_path,
+    bkg,
+    r_scale=0.6,
+    l_scale=0.8,
+    gmag_lim=13.2,
+    save_to_file=False,
+    survey='UNIONS',
+):
+    star_df = find_stars(tile_str, header)
+    full_star_df = star_fit(star_df)
 
-    Args:
-        file_path (str): path to the fits file
-        data (numpy.ndarray): image data
-        header (fits header): header of the fits file
-        survey (str, optional): survey name, defaults to UNIONS
-        folder (str, optional): folder where potential plots will be saved
+    # check if there is a bright star in the field
+    gmag_brightest = np.min(star_df['Gmag'].values)
 
-    Returns:
-        masked image data (array)
-    """
-    logger.info(f'Removing background for tile {os.path.basename(file_path)}..')
-    bkg_start = time.time()
-    data[data == 0] = np.nan
-    # data_sub, bkg_orig = remove_background(data)
-    data_sub, bkg_rms = get_background(data)
-    logger.info(
-        f'Background for tile {os.path.basename(file_path)} removed! Took {np.round(time.time() - bkg_start)} seconds.'
-    )
-
-    wcs = WCS(header)
-    tile_width, tile_height = header['NAXIS1'], header['NAXIS2']
-    pix_scale = abs(header['CD1_1'] * 3600)
-    dim_x_arcsec = tile_width * pix_scale
-    dim_y_arcsec = tile_height * pix_scale
-    tile_coord = SkyCoord(ra=header['CRVAL1'], dec=header['CRVAL2'], unit='deg', frame='icrs')
-    # extend search radius to include stars that are just outside the field
-    search_radius = np.sqrt(dim_x_arcsec**2 + dim_y_arcsec**2) / 2 + 200
-
-    # query gaia stars in the field
-    star_df = find_stars(file_path, [tile_height, tile_width], tile_coord, search_radius, wcs)
-    star_df = star_fit(star_df)
-
-    logger.info(f'Masking stars for tile {os.path.basename(file_path)}..')
-    x_arr, y_arr, r_arr, len_arr, thick_arr = (
-        star_df.x.values,
-        star_df.y.values,
-        star_df.R_ISO.values,
-        star_df.diffs_len_fit.values,
-        star_df.diffs_thick_fit.values,
-    )
-
-    # create an empty image the size of the field
-    stellar_mask = np.zeros_like(data)
-    x_arr_int = [int(x) for x in x_arr]
-    y_arr_int = [int(x) for x in y_arr]
-    centers = np.column_stack((x_arr_int, y_arr_int))
-
-    # use UNIONS parameters as default
-    r_arr_int = [int(x * 1.5) for x in r_arr]
-    len_arr_int = [int(x * 3.5) for x in len_arr]
-    thick_arr_int = [int(x * 5) for x in thick_arr]
-
-    if survey == 'DECALS':
-        r_arr_int = [int(x * 1.7) for x in r_arr]
-        len_arr_int = [int(x * 1.2) for x in len_arr]
-        thick_arr_int = [int(x * 2) for x in thick_arr]
-    if survey == 'UNIONS':
-        r_arr_int = [int(x * 1.5) for x in r_arr]
-        len_arr_int = [int(x * 3.5) for x in len_arr]
-        thick_arr_int = [int(x * 5) for x in thick_arr]
-    if survey == 'LBT':
-        r_arr_int = [int(x * 1.5) for x in r_arr]
-        len_arr_int = [int(x * 3.5) for x in len_arr]
-        thick_arr_int = [int(x * 5) for x in thick_arr]
-
-    for center, r, len, thick in zip(centers, r_arr_int, len_arr_int, thick_arr_int):
-        if survey == 'DECALS':
-            cv2.drawMarker(
-                stellar_mask,
-                center,
-                color=(255, 255, 255),
-                markerType=cv2.MARKER_TILTED_CROSS,
-                markerSize=len,
-                thickness=thick,
-            )
+    bkg_factor = 5.0
+    if gmag_brightest < 9.0:
+        bright_star_flag = True
+        if gmag_brightest < 7.0:
+            bkg_factor = 30.0
         else:
-            cv2.drawMarker(
-                stellar_mask,
-                center,
-                color=(255, 255, 255),
-                markerType=cv2.MARKER_CROSS,
-                markerSize=len,
-                thickness=thick,
-            )
+            bkg_factor = 10.0
+    else:
+        bright_star_flag = False
 
-        cv2.circle(stellar_mask, center, r, (255, 255, 255), -1)
-    stellar_mask[stellar_mask > 0] = 1
+    dim_star_df = full_star_df.loc[star_df['Gmag'] > gmag_lim].reset_index(drop=True)
+    bright_star_df = full_star_df.loc[star_df['Gmag'] <= gmag_lim].reset_index(drop=True)
 
-    # save mask to file
-    # hdu_mask = fits.PrimaryHDU(star_mask, wcs.to_header())
-    # hdu_mask.writeto(folder + fits_name + '_star_mask_cv2.fits', overwrite=True)
+    h, w = data.shape
+    bright_star_mask = np.zeros((h, w), dtype=np.uint8)
 
-    # add high negative values to mask and replace with gaussian noise
-    neg_mask = data < -9.0
-    nan_mask = np.isnan(data)
-    star_neg_mask = (stellar_mask == 1) | (neg_mask == 1) | (nan_mask == 1)
-    if survey == 'DECALS':
-        saturated_mask = data >= 9.9
-        star_neg_mask = (
-            (stellar_mask == 1) | (neg_mask == 1) | (nan_mask == 1) | (saturated_mask == 1)
+    # Create mask for bright stars (not to be replaced)
+    for _, star in bright_star_df.iterrows():
+        x, y = int(round(star.x)), int(round(star.y))
+        r = max(int(round(star.R_ISO * r_scale)), 1)
+        cv2.circle(bright_star_mask, (x, y), r, 255, -1, lineType=cv2.LINE_AA)
+
+        # Add diffraction spikes for bright stars
+        spike_len = int(round(star.diffs_len_fit * l_scale))
+        spike_thick = int(round(star.diffs_thick_fit * 5))
+        cv2.drawMarker(
+            bright_star_mask,
+            (x, y),
+            color=255,
+            markerType=cv2.MARKER_CROSS,
+            markerSize=spike_len,
+            thickness=spike_thick,
         )
-    if survey == 'LBT':
-        saturated_mask = data >= 12
-        star_neg_mask = (
-            (stellar_mask == 1) | (neg_mask == 1) | (nan_mask == 1) | (saturated_mask == 1)
-        )
-    gaussian_noise = np.random.normal(0, bkg_rms, np.count_nonzero(star_neg_mask))
-    data_masked = np.copy(data_sub)
-    data_masked[star_neg_mask != 0] = gaussian_noise
-    logger.info(f'Stars masked for tile {os.path.basename(file_path)}')
 
-    with open('bkg_rms_median.txt', 'w') as f:
-        f.write(str(bkg_rms))
+    data, replaced_star_mask, visualization_mask = replace_with_local_background(
+        data, dim_star_df, bright_star_mask, r_scale, l_scale, bkg, bkg_factor
+    )
 
-    return data_masked, bkg_rms
+    if save_to_file:
+        directory, filename = os.path.split(file_path)
+        name, extension = os.path.splitext(filename)
+        new_filename = f'{name}_star_mask{extension}'
+        out_path = os.path.join(directory, new_filename)
+        new_hdu = fits.PrimaryHDU(data=data.astype(np.float32), header=header)
+        # save new fits file
+        new_hdu.writeto(out_path, overwrite=True)
+
+    return data, replaced_star_mask, out_path, bright_star_flag, gmag_brightest, visualization_mask
 
 
 def streak_mask(data_masked, file_path, bkg_rms, table_dir, header, psf_multiplier=2.0):
@@ -512,7 +576,7 @@ def save_processed(data_binned, header, file_path, bin_size, preprocess_type, up
     # save new fits file
     new_hdu.writeto(out_path, overwrite=True)
 
-    return out_path, new_header
+    return data_binned, out_path, new_header
 
 
 def adjust_flux_with_zp(flux, current_zp, standard_zp):
@@ -528,7 +592,53 @@ def bin_image_cv2(image, bin_size):
     )
 
 
-def prep_tile(file_path, fits_ext, zp, bin_size=4):
+def mask_hot_pixels(image, threshold, bkg, max_size=3, sigma=5):
+    # Create a mask of pixels above the threshold
+    hot_pixels = image > threshold
+    neighbor_threshold = bkg.background_median + sigma * bkg.background_rms_median
+
+    # Label connected regions
+    labeled, num_features = label(hot_pixels)
+
+    # Get the size of each labeled region
+    sizes = np.bincount(labeled.ravel())
+
+    # Create a mask of regions that are small enough
+    mask_size = sizes <= max_size
+    mask_size[0] = 0  # Remove background
+
+    # Apply the size mask to the labeled image
+    potential_hot_pixels = mask_size[labeled]
+
+    # Create a structure for dilation (3x3 square)
+    structure = np.ones((3, 3), dtype=bool)
+
+    # Dilate the potential hot pixels
+    dilated = binary_dilation(potential_hot_pixels, structure=structure)
+
+    # The outline is the difference between the dilated image and the original
+    outline = dilated & ~potential_hot_pixels
+
+    not_hot = np.zeros_like(image, dtype=bool)
+    not_hot[outline] = image[outline] <= neighbor_threshold
+
+    # Identify hot pixels
+    hot_pixel_mask = np.zeros_like(image, dtype=bool)
+
+    # Dilate the not_hot mask to touch the potential hot pixels
+    touching_not_hot = binary_dilation(not_hot, structure=structure)
+
+    # Hot pixels are those that are potential hot pixels and touch a not_hot pixel
+    hot_pixel_mask = potential_hot_pixels & touching_not_hot
+
+    # Create a copy of the image and mask the hot pixels
+    masked_image = image.copy()
+    masked_image[hot_pixel_mask] = np.median(image)  # Replace with median value
+
+    return masked_image, hot_pixel_mask
+
+
+def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
     """
     Preprocess a tile for detection with MTO. This includes masking stars and streaks, and smoothing the image.
 
@@ -547,8 +657,69 @@ def prep_tile(file_path, fits_ext, zp, bin_size=4):
         data = adjust_flux_with_zp(data, current_zp=zp, standard_zp=30.0)
     # bin image to increase signal-to-noise + aid LSB detection
     binned_image = bin_image_cv2(data, bin_size)
-    # save preprocessed image to fits
-    file_path_binned, header_binned = save_processed(
+    # save binned image to fits
+    data_binned, file_path_binned, header_binned = save_processed(
         binned_image, header, file_path, bin_size, preprocess_type='rebin'
     )
-    return file_path_binned, header_binned
+    # detect data anomalies and set them to zero
+    data_ano_mask, file_path_ano_mask = detect_anomaly(
+        data_binned, header_binned, file_path_binned, replace_anomaly=True, save_to_file=True
+    )
+    # estimate the background
+    _, bkg, _ = remove_background(
+        data_ano_mask, header, file_path_ano_mask, bw=100, bh=100, estimator=MedianBackground()
+    )
+    # mask hot pixels
+    data_ano_mask, hot_mask = mask_hot_pixels(
+        data_ano_mask, threshold=70, bkg=bkg, max_size=3, sigma=5
+    )
+    # find and mask dim stars up to a magnitude of gmag_lim
+    (
+        data_star_mask,
+        star_mask,
+        file_path_star_mask,
+        bright_star_flag,
+        gmag_brightest,
+        visualization_mask,
+    ) = mask_stars(
+        tile_str(tile),
+        data_ano_mask,
+        header_binned,
+        file_path_ano_mask,
+        bkg,
+        r_scale=0.55,
+        l_scale=0.8,
+        gmag_lim=11.0,
+        save_to_file=True,
+    )
+
+    # If there is a bright star in the image MTO struggles to accurately estimate the background
+    # so we remove it in these cases
+    if bright_star_flag:
+        # narrower background window for fields with brighter stars
+        if gmag_brightest <= 7:
+            bkg_dim = 50
+        else:
+            bkg_dim = 100
+        data_sub, bkg, file_path_sub = remove_background(
+            data_star_mask,
+            header,
+            file_path_star_mask,
+            bw=bkg_dim,
+            bh=bkg_dim,
+            estimator=MedianBackground(),
+            save_file=True,
+        )
+        data_prepped, file_path_prepped = data_sub, file_path_sub
+        # delete data products from intermediate steps
+        delete_file(file_path_binned)
+        delete_file(file_path_ano_mask)
+        delete_file(file_path_star_mask)
+
+    else:
+        data_prepped, file_path_prepped = data_star_mask, file_path_star_mask
+        # delete data products from intermediate steps
+        delete_file(file_path_binned)
+        delete_file(file_path_ano_mask)
+
+    return data_prepped, file_path_prepped, header_binned

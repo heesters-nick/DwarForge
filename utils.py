@@ -14,6 +14,7 @@ from astropy.stats import SigmaClip
 from astropy.wcs import WCS
 from astroquery.gaia import Gaia
 from photutils.background import Background2D
+from scipy.stats import truncnorm
 from sklearn.decomposition import PCA
 from vos import Client
 
@@ -487,12 +488,12 @@ def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
     Raises:
         ValueError: If the WCS information cannot be extracted from the FITS header.
     """
-    # replace data anomalies with zeros
-    data = detect_anomaly(data, replace_anomaly=True)
     # replace nan values with zeros
     data[np.isnan(data)] = 0.0
     # replace highly negative values with zeros
-    data[data < -9.0] = 0.0
+    data[data < -5.0] = 0.0
+    # replace data anomalies with zeros
+    data = detect_anomaly(data, replace_anomaly=True)
 
     wcs = WCS(header)
 
@@ -511,7 +512,7 @@ def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
     else:
         raise ValueError('Unable to determine pixel scale from FITS header.')
 
-    radius_pixels = int(radius_arcsec / pixel_scale)
+    radius_pixels = int(np.round(radius_arcsec / pixel_scale))
 
     # Extract the region around the coordinate
     y_min = max(0, y - radius_pixels)
@@ -522,4 +523,28 @@ def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
 
     # Check if more than 90% of the pixels are zero
     zero_fraction = np.sum(region == 0) / region.size
-    return zero_fraction > 0.8
+    return zero_fraction > 0.6
+
+
+def generate_positive_trunc_normal(annulus_data, mean, std, size):
+    print(f'mean: {mean}, std: {std}')
+
+    if len(annulus_data) != 0:
+        lower, upper = np.percentile(annulus_data, 80), 10**5
+        print(f'percentile: {np.percentile(annulus_data, 80)}')
+        print(f'frac > 0: {np.sum(annulus_data > 1)/len(annulus_data)}')
+    else:
+        lower, upper = 0, 10**5
+
+    scale = max(std, 0.1)
+    loc = mean
+
+    try:
+        # Calculate the standard truncated normal distribution's limits
+        a, b = (lower - loc) / scale, (upper - loc) / scale
+    except Exception as e:
+        print(f'Error: {e}')
+
+    # Generate values
+    positive_values = truncnorm.rvs(a, b, loc=loc, scale=scale, size=size)
+    return positive_values
