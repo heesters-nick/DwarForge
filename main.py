@@ -228,7 +228,7 @@ lens_catalog = os.path.join(table_directory, 'known_lenses.parquet')
 # define the path to the master catalog that accumulates information about the cut out objects
 catalog_master = os.path.join(table_directory, 'cutout_cat_master.parquet')
 # define the path to the catalog containing known dwarf galaxies
-dwarf_catalog = os.path.join(table_directory, 'all_known_dwarfs_processed.csv')
+dwarf_catalog = os.path.join(table_directory, 'all_known_dwarfs_v2_processed.csv')
 # define path to file containing the processed h5 files
 processed_file = os.path.join(table_directory, 'processed.txt')
 # define catalog file

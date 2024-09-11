@@ -18,7 +18,6 @@ from scipy.stats import truncnorm
 from sklearn.decomposition import PCA
 from vos import Client
 
-from detect import detect_anomaly
 from logging_setup import get_logger
 
 client = Client()
@@ -488,12 +487,6 @@ def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
     Raises:
         ValueError: If the WCS information cannot be extracted from the FITS header.
     """
-    # replace nan values with zeros
-    data[np.isnan(data)] = 0.0
-    # replace highly negative values with zeros
-    data[data < -5.0] = 0.0
-    # replace data anomalies with zeros
-    data = detect_anomaly(data, replace_anomaly=True)
 
     wcs = WCS(header)
 

@@ -261,6 +261,11 @@ def detect_anomaly(
     if isinstance(image, str):
         image, header = open_fits(image, fits_ext=0)
 
+    # replace nan values with zeros
+    image[np.isnan(image)] = 0.0
+    # replace highly negative values with zeros
+    image[image < -5.0] = 0.0
+
     # Perform a 2D Discrete Wavelet Transform using Haar wavelets
     coeffs = pywt.dwt2(image, 'haar')
     cA, (cH, cV, cD) = coeffs  # Decomposition into approximation and details
