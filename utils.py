@@ -10,10 +10,12 @@ import pandas as pd
 # import sep
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from astropy.io import fits
 from astropy.stats import SigmaClip
 from astropy.wcs import WCS
 from astroquery.gaia import Gaia
 from photutils.background import Background2D
+from scipy.spatial import cKDTree
 from scipy.stats import truncnorm
 from sklearn.decomposition import PCA
 from vos import Client
@@ -83,8 +85,8 @@ def query_gaia_stars(target_coord, r_arcsec):
     # Remove sources that are galaxy candidates
     table = table.loc[~table['in_galaxy_candidates']].reset_index(drop=True)
     table.rename(columns={'phot_g_mean_mag': 'Gmag'}, inplace=True)
-    # Remove sources with Gmag > 20.5
-    table = table.loc[table['Gmag'] < 20.5].reset_index(drop=True)
+    # Remove sources with Gmag >= 20.6
+    table = table.loc[table['Gmag'] < 20.6].reset_index(drop=True)
     return table
 
 
@@ -128,17 +130,17 @@ def get_background(data, thresh=1, bw=200, bh=200, mask=None):
     return image_c, bkg.globalrms
 
 
-def piecewise_function_with_break_global(x, break_point, a, b, c, d):
+def piecewise_function_with_break_global(x, a, b, c, d, break_point):
     """
     Compute the piecewise function with a break point.
 
     Args:
         x (float or array-like): The input values.
-        break_point (float): The break point value.
         a (float): Coefficient for the exponential term before the break point.
         b (float): Coefficient for the exponential term.
         c (float): Constant term before the break point.
         d (float): Coefficient for the exponential term after the break point.
+        break_point (float): The break point value.
 
     Returns:
         float or array-like: The computed values of the piecewise function.
@@ -520,12 +522,12 @@ def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
 
 
 def generate_positive_trunc_normal(annulus_data, mean, std, size):
-    print(f'mean: {mean}, std: {std}')
+    #     print(f'mean: {mean}, std: {std}')
 
     if len(annulus_data) != 0:
-        lower, upper = np.percentile(annulus_data, 80), 10**5
-        print(f'percentile: {np.percentile(annulus_data, 80)}')
-        print(f'frac > 0: {np.sum(annulus_data > 1)/len(annulus_data)}')
+        lower, upper = np.percentile(annulus_data, 60), 10**5
+    #         print(f'percentile: {np.percentile(annulus_data, 60)}')
+    #         print(f'frac > 0: {np.sum(annulus_data > lower)/len(annulus_data)}')
     else:
         lower, upper = 0, 10**5
 
@@ -541,3 +543,37 @@ def generate_positive_trunc_normal(annulus_data, mean, std, size):
     # Generate values
     positive_values = truncnorm.rvs(a, b, loc=loc, scale=scale, size=size)
     return positive_values
+
+
+def open_fits(file_path, fits_ext):
+    """
+    Open fits file and return data and header.
+
+    Args:
+        file_path (str): name of the fits file
+        fits_ext (int): extension of the fits file
+
+    Returns:
+        data (numpy.ndarray): image data
+        header (fits header): header of the fits file
+    """
+    logger.debug(f'Opening fits file {os.path.basename(file_path)}..')
+    with fits.open(file_path, memmap=True) as hdul:
+        data = hdul[fits_ext].data.astype(np.float32)  # type: ignore
+        header = hdul[fits_ext].header  # type: ignore
+    logger.debug(f'Fits file {os.path.basename(file_path)} opened.')
+    return data, header
+
+
+def create_cartesian_kdtree(ra, dec):
+    """
+    Create a KD-Tree using Cartesian coordinates converted from RA and Dec.
+
+    :param ra: Right Ascension in degrees
+    :param dec: Declination in degrees
+    :return: cKDTree object and the corresponding SkyCoord object
+    """
+    coords = SkyCoord(ra, dec, unit='deg', frame='icrs')
+    xyz = coords.cartesian.xyz.value.T
+    tree = cKDTree(xyz)
+    return tree, coords

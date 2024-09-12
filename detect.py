@@ -6,13 +6,14 @@ import joblib
 import numpy as np
 import pandas as pd
 import pywt
+from astropy.io import fits
 
 # import sep
 from astropy.wcs import WCS
 from scipy.ndimage import binary_dilation, label
 
 from logging_setup import get_logger
-from preprocess import open_fits
+from utils import open_fits
 
 logger = get_logger()
 
@@ -251,11 +252,14 @@ def source_detection(image, thresh=3.0, minarea=5):
 
 def detect_anomaly(
     image,
+    header,
+    file_path,
     zero_threshold=0.0025,
     min_size=50,
     replace_anomaly=False,
     dilate_mask=False,
     dilation_iters=1,
+    save_to_file=False,
 ):
     # Takes both data or path to file
     if isinstance(image, str):
@@ -319,4 +323,13 @@ def detect_anomaly(
     if replace_anomaly:
         image[global_mask] = 0.0
 
-    return image
+    if save_to_file:
+        directory, filename = os.path.split(file_path)
+        name, extension = os.path.splitext(filename)
+        new_filename = f'{name}_ano_mask{extension}'
+        out_path = os.path.join(directory, new_filename)
+        new_hdu = fits.PrimaryHDU(data=image, header=header)
+        # save new fits file
+        new_hdu.writeto(out_path, overwrite=True)
+
+    return image, out_path

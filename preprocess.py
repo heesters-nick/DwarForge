@@ -20,6 +20,7 @@ from utils import (
     delete_file,
     func_PCA,
     generate_positive_trunc_normal,
+    open_fits,
     piecewise_function_with_break_global,
     piecewise_linear,
     power_law,
@@ -28,26 +29,6 @@ from utils import (
 )
 
 logger = get_logger()
-
-
-def open_fits(file_path, fits_ext):
-    """
-    Open fits file and return data and header.
-
-    Args:
-        file_path (str): name of the fits file
-        fits_ext (int): extension of the fits file
-
-    Returns:
-        data (numpy.ndarray): image data
-        header (fits header): header of the fits file
-    """
-    logger.debug(f'Opening fits file {os.path.basename(file_path)}..')
-    with fits.open(file_path, memmap=True) as hdul:
-        data = hdul[fits_ext].data.astype(np.float32)  # type: ignore
-        header = hdul[fits_ext].header  # type: ignore
-    logger.debug(f'Fits file {os.path.basename(file_path)} opened.')
-    return data, header
 
 
 def remove_background(
@@ -69,7 +50,7 @@ def remove_background(
         # Combine the directory and new filename
         out_path = os.path.join(directory, new_filename)
         # Create a new HDU with the rebinned data and updated header
-        new_hdu = fits.PrimaryHDU(data=data_sub, header=header)
+        new_hdu = fits.PrimaryHDU(data=data_sub.astype(np.float32), header=header)
         # save new fits file
         new_hdu.writeto(out_path, overwrite=True)
     else:
@@ -174,7 +155,6 @@ def replace_with_local_background(
             / len(check_pixels)
             >= embedded_threshold
         )
-        #         is_embedded = np.sum(check_pixels > max(1, bkg_factor*median_background)) / len(check_pixels) >= embedded_threshold
 
         if is_embedded:
             r_reduced = max(int(np.round(r * 0.5)), 1)
@@ -255,6 +235,171 @@ def replace_with_local_background(
     return result, replaced_stars_mask.astype(bool), visualization_mask
 
 
+# def replace_with_local_background_old(
+#     data, star_df, bright_star_mask, r_scale, l_scale, bkg, bkg_factor, embedded_threshold=0.9
+# ):
+#     h, w = data.shape
+#     result = data.copy()
+#     total_stars = len(star_df)
+#     skipped_stars = 0
+
+#     bright_star_mask = bright_star_mask.astype(np.uint8)
+#     replaced_stars_mask = np.zeros_like(bright_star_mask, dtype=np.uint8)
+
+#     visualization_mask = np.zeros((h, w, 3), dtype=np.uint8)
+
+#     def create_annular_segments(shape, center, inner_r, outer_r, l, t, n_segments=4):
+#         y, x = center
+#         mask = np.zeros(shape, dtype=np.uint8)
+
+#         yy, xx = np.ogrid[: shape[0], : shape[1]]
+#         distances = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
+
+#         # Use arctan2 for full 360-degree angle range
+#         angles = np.arctan2(yy - y, xx - x)
+#         # Shift angles to be in [0, 2π) range
+#         angles = (angles + 2 * np.pi) % (2 * np.pi)
+#         # set annulus extend
+#         annulus_extend = max(int(np.round(outer_r / 2)) + 2, l + 1)
+#         # define annulus mask
+#         annulus = (distances >= inner_r + 1) & (distances <= int(np.round(outer_r / 2)) + 2)
+
+#         segment_size = 2 * np.pi / n_segments
+#         for i in range(n_segments):
+#             start_angle = i * segment_size
+#             end_angle = (i + 1) * segment_size
+
+#             # Handle the case where the segment crosses the 0/2π boundary
+#             if start_angle < end_angle:
+#                 segment = (angles >= start_angle) & (angles < end_angle)
+#             else:
+#                 segment = (angles >= start_angle) | (angles < end_angle)
+
+#             mask[(annulus & segment)] = 255
+
+#         # Remove diffraction spike areas
+#         spike_mask = np.zeros(shape, dtype=np.uint8)
+#         cv2.drawMarker(
+#             spike_mask, (x, y), color=255, markerType=cv2.MARKER_CROSS, markerSize=l, thickness=t
+#         )
+#         mask[spike_mask > 0] = 0
+
+#         return mask
+
+#     for _, star in star_df.iterrows():
+#         y, x = np.round(star.y).astype(np.int32), np.round(star.x).astype(np.int32)
+#         r = max(np.round(star.R_ISO * r_scale).astype(np.int32), 1)
+#         l = int(np.round(star.diffs_len_fit * l_scale))
+#         t = max(1, int(np.round(star.diffs_thick_fit)))
+
+#         outer_r = max(r + 7, l + 2)  # Ensure we capture enough background
+
+#         y_min, y_max = max(0, y - outer_r), min(h, y + outer_r + 1)
+#         x_min, x_max = max(0, x - outer_r), min(w, x + outer_r + 1)
+#         local_region = result[y_min:y_max, x_min:x_max]
+#         local_y, local_x = y - y_min, x - x_min
+
+#         # Create star region mask including diffraction spikes
+#         star_region = np.zeros_like(local_region, dtype=np.uint8)
+#         cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)
+#         if l > 0:
+#             cv2.drawMarker(
+#                 star_region,
+#                 (local_x, local_y),
+#                 color=255,
+#                 markerType=cv2.MARKER_CROSS,
+#                 markerSize=l,
+#                 thickness=t,
+#             )
+
+#         # Check if star is embedded
+#         check_annulus = cv2.circle(
+#             np.zeros_like(local_region, dtype=np.uint8), (local_x, local_y), r + 2, 255, 1
+#         )
+#         check_pixels = local_region[check_annulus > 0]
+#         median_background = bkg.background_median
+#         rms_background = bkg.background_rms_median
+#         is_embedded = (
+#             np.sum(check_pixels > max(1, bkg_factor * rms_background + median_background))
+#             / len(check_pixels)
+#             >= embedded_threshold
+#         )
+#         #         is_embedded = np.sum(check_pixels > max(1, bkg_factor*median_background)) / len(check_pixels) >= embedded_threshold
+
+#         if is_embedded:
+#             r_reduced = max(int(np.round(r * 0.5)), 1)
+#             l_reduced = l
+#             star_region_reduced = np.zeros_like(local_region, dtype=np.uint8)
+#             cv2.circle(
+#                 star_region_reduced, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA
+#             )
+#             if l > 0:
+#                 l_reduced = max(int(np.round(l * 0.4)), 1)
+#                 cv2.drawMarker(
+#                     star_region_reduced,
+#                     (local_x, local_y),
+#                     color=255,
+#                     markerType=cv2.MARKER_CROSS,
+#                     markerSize=l_reduced,
+#                     thickness=t,
+#                 )
+
+#             # Create a narrow annulus around the reduced star region for background estimation
+#             inner_r_bg = r_reduced
+#             outer_r_bg = l_reduced  # Up to reduced length of diffraction spikes
+#             bg_segments = create_annular_segments(
+#                 local_region.shape, (local_y, local_x), inner_r_bg, outer_r_bg, l_reduced, t
+#             )
+#         else:
+#             star_region_reduced = star_region
+#             # Use the original background estimation for non-embedded stars
+#             bg_segments = create_annular_segments(
+#                 local_region.shape, (local_y, local_x), r, outer_r, l, t
+#             )
+
+#         # Exclude all stars (bright and dim) from the background segments
+#         local_bright_star_mask = bright_star_mask[y_min:y_max, x_min:x_max]
+#         bg_segments[local_bright_star_mask > 0] = 0
+
+#         visualization_mask[y_min:y_max, x_min:x_max, 0] |= (
+#             star_region_reduced  # Red for star region
+#         )
+#         visualization_mask[y_min:y_max, x_min:x_max, 1] |= (
+#             bg_segments  # Green for background segments
+#         )
+
+#         if np.any((star_region_reduced > 0) & (local_bright_star_mask > 0)):
+#             skipped_stars += 1
+#             continue
+
+#         bg_data = local_region[bg_segments > 0]
+
+#         if len(bg_data) == 0 or np.count_nonzero(np.isnan(bg_data)) / len(bg_data) > 0.9:
+#             skipped_stars += 1
+#             continue
+
+#         mean, median, std = sigma_clipped_stats(bg_data, sigma=3.0)
+
+#         num_pixels = np.sum(star_region_reduced > 0)
+#         if is_embedded:
+#             # For embedded stars, use a more conservative approach
+#             random_values = generate_positive_trunc_normal(
+#                 bg_data, median, min(std, 3.0), num_pixels
+#             )
+#         else:
+#             random_values = np.random.normal(median, min(std, 3.0), num_pixels)
+
+#         local_result = local_region.copy()
+#         local_result[star_region_reduced > 0] = random_values
+
+#         result[y_min:y_max, x_min:x_max] = local_result
+
+#         replaced_stars_mask[y_min:y_max, x_min:x_max] |= star_region_reduced
+
+#     print(f'Skipped {skipped_stars}/{total_stars} stars.')
+#     return result, replaced_stars_mask.astype(bool), visualization_mask
+
+
 def find_stars(tile, header):
     """
     Find stars within a given search radius around a specific coordinate.
@@ -276,11 +421,11 @@ def find_stars(tile, header):
     search_radius = np.sqrt(dim_x_arcsec**2 + dim_y_arcsec**2) / 2 + 200
     #     print(f'search_radius: {search_radius} arcsec')
 
-    print(f'Querying Gaia for tile {tile}..')
+    logger.debug(f'Querying Gaia for tile {tile}..')
     star_df = query_gaia_stars(tile_coord, search_radius)
     star_df.dropna(inplace=True)
     if star_df.empty:
-        print(f'No stars found in tile {tile}.')
+        logger.info(f'No stars found in tile {tile}.')
         return star_df
     c_star = SkyCoord(ra=star_df.ra, dec=star_df.dec, unit='deg', frame='icrs')
     x_star, y_star = wcs.world_to_pixel(c_star)
@@ -289,7 +434,7 @@ def find_stars(tile, header):
 
     star_df = star_df[mask].reset_index(drop=True)
     star_df['x'], star_df['y'] = x_star[mask], y_star[mask]
-    print(f'{len(star_df)} stars found in tile {tile}.')
+    logger.info(f'{len(star_df)} stars found in tile {tile}.')
 
     return star_df
 
@@ -355,13 +500,13 @@ def mask_stars(
 
     # Create mask for bright stars (not to be replaced)
     for _, star in bright_star_df.iterrows():
-        x, y = int(round(star.x)), int(round(star.y))
-        r = max(int(round(star.R_ISO * r_scale)), 1)
+        x, y = round(star.x), round(star.y)
+        r = max(round(star.R_ISO * r_scale), 1)
         cv2.circle(bright_star_mask, (x, y), r, 255, -1, lineType=cv2.LINE_AA)
-
         # Add diffraction spikes for bright stars
-        spike_len = int(round(star.diffs_len_fit * l_scale))
-        spike_thick = int(round(star.diffs_thick_fit * 5))
+        spike_len = round(star.diffs_len_fit * l_scale)
+        spike_thick = round(star.diffs_thick_fit * 5.0)
+
         cv2.drawMarker(
             bright_star_mask,
             (x, y),
@@ -650,6 +795,7 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
     Returns:
         str, str: path to preprocessed file, header of preprocessed file
     """
+    prep_start = time.time()
     # read in data and header
     data, header = open_fits(file_path, fits_ext)
     # adjust zeropoint
@@ -661,18 +807,30 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
     data_binned, file_path_binned, header_binned = save_processed(
         binned_image, header, file_path, bin_size, preprocess_type='rebin'
     )
+    start = time.time()
     # detect data anomalies and set them to zero
     data_ano_mask, file_path_ano_mask = detect_anomaly(
         data_binned, header_binned, file_path_binned, replace_anomaly=True, save_to_file=True
     )
+    logger.info(f'{tile_str(tile)}: detected anomalies in {time.time()-start:.2f} seconds.')
     # estimate the background
+    start = time.time()
     _, bkg, _ = remove_background(
-        data_ano_mask, header, file_path_ano_mask, bw=100, bh=100, estimator=MedianBackground()
+        data_ano_mask,
+        header_binned,
+        file_path_ano_mask,
+        bw=100,
+        bh=100,
+        estimator=MedianBackground(),
     )
+    logger.info(f'{tile_str(tile)}: estimated background in {time.time()-start:.2f} seconds.')
     # mask hot pixels
+    start = time.time()
     data_ano_mask, hot_mask = mask_hot_pixels(
         data_ano_mask, threshold=70, bkg=bkg, max_size=3, sigma=5
     )
+    logger.info(f'{tile_str(tile)}: masked hot pixels in {time.time()-start:.2f} seconds.')
+    start = time.time()
     # find and mask dim stars up to a magnitude of gmag_lim
     (
         data_star_mask,
@@ -685,41 +843,46 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
         tile_str(tile),
         data_ano_mask,
         header_binned,
-        file_path_ano_mask,
+        file_path_binned,
         bkg,
         r_scale=0.55,
         l_scale=0.8,
         gmag_lim=11.0,
         save_to_file=True,
     )
+    logger.info(f'{tile_str(tile)}: masked stars in {time.time()-start:.2f} seconds.')
 
     # If there is a bright star in the image MTO struggles to accurately estimate the background
     # so we remove it in these cases
+    start = time.time()
     if bright_star_flag:
         # narrower background window for fields with brighter stars
-        if gmag_brightest <= 7:
+        if gmag_brightest <= 8:
             bkg_dim = 50
+        elif gmag_brightest <= 7:
+            bkg_dim = 25
         else:
             bkg_dim = 100
-        data_sub, bkg, file_path_sub = remove_background(
+        data_sub, _, file_path_sub = remove_background(
             data_star_mask,
-            header,
+            header_binned,
             file_path_star_mask,
             bw=bkg_dim,
             bh=bkg_dim,
             estimator=MedianBackground(),
             save_file=True,
         )
+        logger.info(f'{tile_str(tile)}: subtracted background in {time.time()-start:.2f} seconds.')
         data_prepped, file_path_prepped = data_sub, file_path_sub
         # delete data products from intermediate steps
-        delete_file(file_path_binned)
         delete_file(file_path_ano_mask)
         delete_file(file_path_star_mask)
 
     else:
         data_prepped, file_path_prepped = data_star_mask, file_path_star_mask
         # delete data products from intermediate steps
-        delete_file(file_path_binned)
         delete_file(file_path_ano_mask)
+
+    logger.info(f'{tile_str(tile)}: tile prepped in {time.time()-prep_start:.2f} seconds.')
 
     return data_prepped, file_path_prepped, header_binned
