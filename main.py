@@ -160,7 +160,7 @@ anchor_band = 'cfis_lsb-r'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
-process_only_known_dwarfs = False
+process_only_known_dwarfs = True
 # define the square cutout size in pixels
 cutout_size = 224
 # minimum surface brightness to select objects

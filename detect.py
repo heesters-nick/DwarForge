@@ -328,7 +328,7 @@ def detect_anomaly(
         name, extension = os.path.splitext(filename)
         new_filename = f'{name}_ano_mask{extension}'
         out_path = os.path.join(directory, new_filename)
-        new_hdu = fits.PrimaryHDU(data=image, header=header)
+        new_hdu = fits.PrimaryHDU(data=image.astype(np.float32), header=header)
         # save new fits file
         new_hdu.writeto(out_path, overwrite=True)
 

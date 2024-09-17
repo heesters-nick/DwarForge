@@ -39,7 +39,9 @@ def remove_background(
     bkg = Background2D(
         image, (bw, bh), filter_size=(3, 3), sigma_clip=sigma_clip, bkg_estimator=bkg_estimator
     )
-    data_sub = image - bkg.background
+    # non-zero mask
+    mask = image > 0
+    data_sub = np.where(mask, image - bkg.background, image)
 
     if save_file:
         directory, filename = os.path.split(file_path)
@@ -812,7 +814,7 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
     data_ano_mask, file_path_ano_mask = detect_anomaly(
         data_binned, header_binned, file_path_binned, replace_anomaly=True, save_to_file=True
     )
-    logger.info(f'{tile_str(tile)}: detected anomalies in {time.time()-start:.2f} seconds.')
+    logger.debug(f'{tile_str(tile)}: detected anomalies in {time.time()-start:.2f} seconds.')
     # estimate the background
     start = time.time()
     _, bkg, _ = remove_background(
@@ -823,13 +825,13 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
         bh=100,
         estimator=MedianBackground(),
     )
-    logger.info(f'{tile_str(tile)}: estimated background in {time.time()-start:.2f} seconds.')
+    logger.debug(f'{tile_str(tile)}: estimated background in {time.time()-start:.2f} seconds.')
     # mask hot pixels
     start = time.time()
     data_ano_mask, hot_mask = mask_hot_pixels(
         data_ano_mask, threshold=70, bkg=bkg, max_size=3, sigma=5
     )
-    logger.info(f'{tile_str(tile)}: masked hot pixels in {time.time()-start:.2f} seconds.')
+    logger.debug(f'{tile_str(tile)}: masked hot pixels in {time.time()-start:.2f} seconds.')
     start = time.time()
     # find and mask dim stars up to a magnitude of gmag_lim
     (
@@ -850,7 +852,7 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
         gmag_lim=11.0,
         save_to_file=True,
     )
-    logger.info(f'{tile_str(tile)}: masked stars in {time.time()-start:.2f} seconds.')
+    logger.debug(f'{tile_str(tile)}: masked stars in {time.time()-start:.2f} seconds.')
 
     # If there is a bright star in the image MTO struggles to accurately estimate the background
     # so we remove it in these cases
@@ -872,7 +874,7 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
             estimator=MedianBackground(),
             save_file=True,
         )
-        logger.info(f'{tile_str(tile)}: subtracted background in {time.time()-start:.2f} seconds.')
+        logger.debug(f'{tile_str(tile)}: subtracted background in {time.time()-start:.2f} seconds.')
         data_prepped, file_path_prepped = data_sub, file_path_sub
         # delete data products from intermediate steps
         delete_file(file_path_ano_mask)
