@@ -29,7 +29,7 @@ from vos import Client  # noqa: E402
 
 from detect import param_phot, run_mto  # noqa: E402
 from kd_tree import build_tree  # noqa: E402
-from postprocess import add_labels  # noqa: E402
+from postprocess import add_labels, load_segmap, make_cutouts, save_to_h5  # noqa: E402
 from preprocess import prep_tile  # noqa: E402
 from shutdown import GracefulKiller, shutdown_worker  # noqa: E402
 from tile_cutter import (  # noqa: E402
@@ -49,6 +49,7 @@ from track_progress import (  # noqa: E402
 from utils import (  # noqa: E402
     TileAvailability,
     delete_file,
+    delete_folder_contents,
     extract_tile_numbers,
     load_available_tiles,
     tile_str,
@@ -146,7 +147,7 @@ band_dict_incl = {key: band_dictionary.get(key) for key in considered_bands}
 
 ### pipeline options ###
 
-create_cutouts = False
+create_cutouts = True
 # plot cutouts?
 plot = False
 # Plot a random cutout from one of the tiles after execution else plot all cutouts
@@ -160,13 +161,13 @@ anchor_band = 'cfis_lsb-r'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
-process_only_known_dwarfs = True
+process_only_known_dwarfs = False
 # define the square cutout size in pixels
-cutout_size = 224
+cutout_size = 64
 # minimum surface brightness to select objects
-mu_limit = 19.1
+mu_limit = 22.0
 # minimum effective radius to select objects
-reff_limit = 1.6
+re_limit = 1.6
 
 
 # retrieve from the VOSpace and update the currently available tiles; takes some time to run
@@ -473,6 +474,9 @@ def download_worker(
                 tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp = tile_band_specs(
                     tile, in_dict, band, download_dir
                 )
+                # delete folder contents from previous runs
+                delete_folder_contents(os.path.dirname(final_path))
+                # download the tile
                 success = download_tile_one_band(
                     tile, tile_fitsfilename, final_path, temp_path, vos_path, band
                 )
@@ -513,6 +517,11 @@ def process_tile_for_band(
     queue_lock,
     processed_in_current_run,
     database,
+    cut_objects,
+    cut_size,
+    re_lim,
+    mu_lim,
+    z_class_cat,
 ):
     while (
         not (all_downloads_complete.is_set() and process_queue.empty())
@@ -549,7 +558,7 @@ def process_tile_for_band(
 
         try:
             # Preprocess (bin)
-            prepped_data, prepped_path, prepped_header = prep_tile(
+            binned_data, prepped_data, prepped_path, prepped_header = prep_tile(
                 tile, final_path, fits_ext, zp, bin_size=4
             )
 
@@ -563,7 +572,7 @@ def process_tile_for_band(
             )
             # Calculate photometric parameters
             mto_det, mto_all = param_phot(
-                param_path, header=prepped_header, zp=zp, mu_min=21.0, reff_min=1.4
+                param_path, header=prepped_header, zp=zp, mu_lim=mu_lim, re_lim=re_lim
             )
 
             # Match detections with catalog
@@ -578,6 +587,7 @@ def process_tile_for_band(
                     fits_path=prepped_path,
                     fits_ext=fits_ext,
                     header=prepped_header,
+                    z_class_cat=z_class_cat,
                 )
                 tile_info.update(matching_stats)
 
@@ -591,6 +601,25 @@ def process_tile_for_band(
             mto_all.to_csv(param_path, index=False)
 
             tile_info['detection_count'] = len(mto_det)
+
+            # make cutouts
+            if cut_objects:
+                segmap = load_segmap(prepped_path)
+                cutouts = make_cutouts(
+                    binned_data,
+                    tile_str=tile_str(tile),
+                    df=mto_det,
+                    segmap=segmap,
+                    cutout_size=cut_size,
+                )
+                path, _ = os.path.splitext(final_path)
+                cutout_path = f'{path}_cutouts.h5'
+                save_to_h5(
+                    stacked_cutout=cutouts,
+                    object_df=mto_det,
+                    tile_numbers=tile,
+                    save_path=cutout_path,
+                )
 
             # delete raw data
             delete_file(final_path)
@@ -667,6 +696,11 @@ def main(
     mem_track_inter,
     mem_aggr_period,
     database,
+    cut_objects,
+    cut_size,
+    re_lim,
+    mu_lim,
+    z_class_cat,
 ):
     # Initialize the database for progress tracking
     init_db(database)
@@ -813,6 +847,11 @@ def main(
                     queue_lock,
                     processed_in_current_run,
                     database,
+                    cut_objects,
+                    cut_size,
+                    re_lim,
+                    mu_lim,
+                    z_class_cat,
                 ),
             )
             p.start()
@@ -1011,6 +1050,11 @@ if __name__ == '__main__':
         'mem_track_inter': args.memory_tracking_interval,
         'mem_aggr_period': args.memory_aggregation_period,
         'database': args.database,
+        'cut_objects': create_cutouts,
+        'cut_size': cutout_size,
+        're_lim': re_limit,
+        'mu_lim': mu_limit,
+        'z_class_cat': redshift_class_catalog,
     }
 
     start = time.time()

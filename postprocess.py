@@ -1,5 +1,7 @@
 import os
+import time
 
+import h5py
 import numpy as np
 import pandas as pd
 from astropy import units as u
@@ -11,6 +13,7 @@ from utils import (
     check_objects_in_neighboring_tiles,
     create_cartesian_kdtree,
     open_fits,
+    read_parquet,
     tile_str,
 )
 from warning_manager import set_warnings
@@ -136,6 +139,33 @@ def match_cats_older(df_det, df_label, tile, max_sep=15.0):
     return det_matching_idx, label_matches, label_unmatches, det_matches
 
 
+def match_stars(df_det, df_label, max_sep=2.0):
+    """
+    Match detections to known objects, return matches, unmatches
+
+    Args:
+        df_det (dataframe): detections dataframe
+        df_label (dataframe): dataframe of objects with labels
+        max_sep (float): maximum separation tollerance
+
+    Returns:
+        det_matching_idx (list): indices of detections for which labels are available
+        label_matches (dataframe): known objects that were detected
+        det_matches (dataframe): detections that are known objects
+    """
+    c_det = SkyCoord(df_det['ra'], df_det['dec'], unit=u.deg)  # type: ignore
+    c_label = SkyCoord(df_label['ra'], df_label['dec'], unit=u.deg)  # type: ignore
+
+    idx, d2d, _ = c_label.match_to_catalog_3d(c_det)
+    # sep_constraint is a list of True/False
+    sep_constraint = d2d < max_sep * u.arcsec  # type: ignore
+    label_matches = df_label[sep_constraint].reset_index(drop=True)
+    label_unmatches = df_label[~sep_constraint].reset_index(drop=True)
+    det_matching_idx = idx[sep_constraint]  # det_matching_idx is a list of indices
+    det_matches = df_det.loc[det_matching_idx].reset_index(drop=True)
+    return det_matching_idx, label_matches, label_unmatches, det_matches
+
+
 def match_cats(df_det, df_label, tile, pixel_scale, max_sep=15.0, re_multiplier=3.0):
     tree, _ = create_cartesian_kdtree(df_det['ra'].values, df_det['dec'].values)
     matches = []
@@ -204,7 +234,9 @@ def match_cats(df_det, df_label, tile, pixel_scale, max_sep=15.0, re_multiplier=
     return list(det_match_idx), label_matches, label_unmatches, det_matches
 
 
-def add_labels(tile, band, det_df, det_df_full, dwarfs_df, fits_path, fits_ext, header):
+def add_labels(
+    tile, band, det_df, det_df_full, dwarfs_df, fits_path, fits_ext, header, z_class_cat
+):
     logger.debug(f'Adding labels to det params for tile {tile_str(tile)}.')
 
     warnings = []
@@ -228,6 +260,13 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df, fits_path, fits_ext, 
         'unmatched_dwarfs_count': 0,
     }
 
+    # cross match with redshift catalog, add available redshifts
+    det_df_updated = add_redshifts(det_df_updated, z_class_cat)
+
+    # add lsb labels to detections dataframe
+    det_df_updated['lsb'] = np.nan
+    det_df_updated['ID_known'] = np.nan
+
     if len(dwarfs_in_tile) == 0:
         logger.debug(f'No known dwarfs in tile {tile_str(tile)}. Skipping matching process.')
         return det_df_updated, matching_stats
@@ -235,10 +274,6 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df, fits_path, fits_ext, 
     det_idx_lsb, lsb_matches, lsb_unmatches, _ = match_cats(
         det_df_updated, dwarfs_in_tile, tile, header, max_sep=15.0
     )
-
-    # add lsb labels to detections dataframe
-    det_df_updated['lsb'] = np.nan
-    det_df_updated['ID_known'] = np.nan
 
     if len(det_idx_lsb) > 0:
         logger.info(f'Found {len(det_idx_lsb)} lsb detections for tile {tile_str(tile)}.')
@@ -331,3 +366,160 @@ def add_labels(tile, band, det_df, det_df_full, dwarfs_df, fits_path, fits_ext, 
     set_warnings(warnings)
 
     return det_df_updated, matching_stats
+
+
+def cutout2d_segmented(data, tile_str, segmap, object_id, x, y, size, cutout_in):
+    """
+    Create 2d cutout from an image, applying a segmentation mask for a specific object.
+
+    Args:
+        data (numpy.ndarray): image data
+        tile_str (str): tile numbers
+        segmap (numpy.ndarray): segmentation map with object IDs
+        object_id (int): ID of the object to isolate in the cutout
+        x (int): x-coordinate of cutout center
+        y (int): y-coordinate of cutout center
+        size (int): square cutout size
+        cutout_in (numpy.ndarray): empty input cutout
+
+    Returns:
+        numpy.ndarray: 2d cutout (size x size pixels) with only the specified object
+    """
+    y_large, x_large = data.shape
+    size_half = size // 2
+    y_start = max(0, y - size_half)
+    y_end = min(y_large, y + (size - size_half))
+    x_start = max(0, x - size_half)
+    x_end = min(x_large, x + (size - size_half))
+
+    if y_start >= y_end or x_start >= x_end:
+        logger.error(f'Tile: {tile_str}: an object is fully outside of the image.')
+
+    cutout_slice = (
+        slice(y_start - y + size_half, y_end - y + size_half),
+        slice(x_start - x + size_half, x_end - x + size_half),
+    )
+    data_slice = slice(y_start, y_end), slice(x_start, x_end)
+
+    # Apply data and segmentation mask
+    cutout_in[cutout_slice] = data[data_slice] * (segmap[data_slice] == object_id)
+
+    return cutout_in
+
+
+def create_segmented_cutouts(data, tile_str, segmap, object_ids, xs, ys, cutout_size):
+    """
+    Create cutouts for multiple objects efficiently.
+
+    Args:
+        data (numpy.ndarray): image data
+        tile_str (str): tile numbers
+        segmap (numpy.ndarray): segmentation map with object IDs
+        object_ids (numpy.ndarray): array of object IDs
+        xs (numpy.ndarray): array of x-coordinates
+        ys (numpy.ndarray): array of y-coordinates
+        cutout_size (int): size of each cutout
+
+    Returns:
+        numpy.ndarray: array of cutouts
+    """
+    cutouts = np.zeros((len(object_ids), cutout_size, cutout_size), dtype=data.dtype)
+    cutout_empty = np.zeros((cutout_size, cutout_size), dtype=data.dtype)
+
+    for i, (obj_id, x, y) in enumerate(zip(object_ids, xs, ys)):
+        cutouts[i] = cutout2d_segmented(
+            data, tile_str, segmap, obj_id, x, y, cutout_size, cutout_empty.copy()
+        )
+
+    return cutouts
+
+
+def make_cutouts(data, tile_str, df, segmap, cutout_size=64):
+    """
+    Makes cutouts from the objects passed in the dataframe, data is multiplied
+    with the corresponding detection segment.
+
+    Args:
+        data (numpy.ndarray): image
+        tile_str (str): tile numbers
+        df (dataframe): object dataframe
+        segmap (numpy.ndarray): segmentation map
+        cutout_size (int, optional): square cutout size. Defaults to 64.
+
+    Returns:
+        numpy.ndarray: cutouts of shape (n_cutouts, cutout_size, cutout_size)
+    """
+    xs = np.floor(df.X.values + 0.5).astype(np.int32)
+    ys = np.floor(df.Y.values + 0.5).astype(np.int32)
+    object_ids = df['ID'].values  # Assuming the index is the object ID
+
+    cutout_start = time.time()
+    cutouts = create_segmented_cutouts(data, tile_str, segmap, object_ids, xs, ys, cutout_size)
+    logger.debug(f'{tile_str}: cutouts done in {time.time()-cutout_start:.2f} seconds.')
+
+    return cutouts
+
+
+def load_segmap(file_path):
+    path, extension = os.path.splitext(file_path)
+    seg_path = f'{path}_seg{extension}'
+    mto_seg, header_seg = open_fits(seg_path, fits_ext=0)
+
+    return mto_seg
+
+
+def save_to_h5(
+    stacked_cutout,
+    object_df,
+    tile_numbers,
+    save_path,
+):
+    """
+    Save cutout data including metadata to file.
+
+    Args:
+        stacked_cutout (numpy.ndarray): stacked numpy array of the image data in different bands
+        object_df (dataframe): object dataframe
+        tile_numbers (tuple): tile numbers
+        save_path (str): path to save the cutout
+
+    Returns:
+        None
+    """
+    logger.info(f'Tile: {tile_numbers} saving cutouts to file: {save_path}')
+    dt = h5py.special_dtype(vlen=str)
+    with h5py.File(save_path, 'w', libver='latest') as hf:
+        hf.create_dataset('images', data=stacked_cutout.astype(np.float32))
+        hf.create_dataset('tile', data=np.asarray(tile_numbers), dtype=np.int32)
+        hf.create_dataset(
+            'known_id', data=np.asarray(object_df['ID_known'].values, dtype='S'), dtype=dt
+        )
+        hf.create_dataset('mto_id', data=np.asarray(object_df['ID'].values.astype(np.int32)))
+        hf.create_dataset('ra', data=object_df['ra'].values.astype(np.float32))
+        hf.create_dataset('dec', data=object_df['dec'].values.astype(np.float32))
+        hf.create_dataset('label', data=object_df['lsb'].values.astype(np.float32))
+        hf.create_dataset('zspec', data=object_df['zspec'].astype(np.float32))
+
+
+def add_redshifts(det_df, z_class_cat):
+    margin = 0.0014  # extend the ra and dec ranges by this amount in degrees
+    ra_range = (np.min(det_df['ra']) - margin, np.max(det_df['ra']) + margin)
+    dec_range = (np.min(det_df['dec'] - margin), np.max(det_df['dec'] + margin))
+
+    # read the redshift/class catalog
+    class_z_df = read_parquet(
+        z_class_cat,
+        ra_range=ra_range,
+        dec_range=dec_range,
+    )
+    # match detections to redshift and class catalog
+    det_idx_z_class, label_matches_z_class, _, _ = match_stars(det_df, class_z_df, max_sep=5.0)
+    det_idx_z_class = det_idx_z_class.astype(np.int32)  # make sure index is int
+
+    # add redshift and class labels to detections dataframe
+    det_df.loc[:, 'class_label'] = np.nan
+    det_df.loc[:, 'zspec'] = np.nan
+    det_df.loc[det_idx_z_class, 'class_label'] = label_matches_z_class['cspec'].values
+    det_df.loc[det_idx_z_class, 'zspec'] = label_matches_z_class['zspec'].values
+
+    return det_df

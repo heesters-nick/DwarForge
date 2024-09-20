@@ -6,13 +6,13 @@ import joblib
 import numpy as np
 import pandas as pd
 import pywt
+import sep
 from astropy.io import fits
-
-# import sep
 from astropy.wcs import WCS
 from scipy.ndimage import binary_dilation, label
 
 from logging_setup import get_logger
+from postprocess import match_stars
 from utils import open_fits
 
 logger = get_logger()
@@ -175,7 +175,7 @@ def run_mto(
     return param_path
 
 
-def param_phot(param_path, header, zp=30.0, mu_min=19.0, reff_min=1.4):
+def param_phot(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6):
     params_field = pd.read_csv(param_path)
     params_field['ra'], params_field['dec'] = WCS(header).all_pix2world(
         params_field['X'], params_field['Y'], 0
@@ -184,7 +184,10 @@ def param_phot(param_path, header, zp=30.0, mu_min=19.0, reff_min=1.4):
     params_field['re_arcsec'] = params_field.R_e * pixel_scale
     params_field['r_fwhm_arcsec'] = params_field.R_fwhm * pixel_scale
     params_field['r_10_arcsec'] = params_field.R10 * pixel_scale
+    params_field['r_25_arcsec'] = params_field.R25 * pixel_scale
+    params_field['r_75_arcsec'] = params_field.R75 * pixel_scale
     params_field['r_90_arcsec'] = params_field.R90 * pixel_scale
+    params_field['r_100_arcsec'] = params_field.R100 * pixel_scale
     params_field['A_arcsec'] = params_field.A * pixel_scale
     params_field['B_arcsec'] = params_field.B * pixel_scale
     params_field['axis_ratio'] = np.minimum(
@@ -205,20 +208,92 @@ def param_phot(param_path, header, zp=30.0, mu_min=19.0, reff_min=1.4):
         drop=True
     )
     mto_all = params_field.copy()
-    params_field = params_field.loc[
-        (params_field['mu'] > mu_min)
-        & (params_field['re_arcsec'] > reff_min)
-        & (params_field['axis_ratio'] > 0.1)
-    ].reset_index(drop=True)
+
+    conditions = {
+        'mu': (mu_lim, None),  # (min, max), None means no limit
+        're_arcsec': (re_lim, 55.0),
+        'axis_ratio': (0.17, None),
+        'r_10_arcsec': (0.39, 19.0),
+        'r_25_arcsec': (0.7, None),
+        'r_75_arcsec': (1.98, None),
+        'r_90_arcsec': (2.3, 150.0),
+        'r_100_arcsec': (2.0, None),
+        'r_fwhm_arcsec': (0.4, 10.6),
+        'mu_median': (0.3, 29.0),
+        'mu_mean': (0.4, 70.0),
+        'mu_max': (1.7, 5700.0),
+        'total_flux': (55, None),
+        'mag': (13.8, 25.7),
+    }
+
+    for column, (min_val, max_val) in conditions.items():
+        if min_val is not None:
+            params_field = params_field[params_field[column] > min_val]
+        if max_val is not None:
+            params_field = params_field[params_field[column] < max_val]
+
     # Remove streaks
     params_field = params_field[
         (params_field['axis_ratio'] >= 0.17) | (params_field['n_pix'] <= 1000)
     ]
+    # mag vs mu filter
+    params_field = params_field[params_field['mu'] > (0.6060 * params_field['mag'] + 11.6293)]
+    # mag vs mu_max filter
+    params_field = params_field[
+        params_field['mu_max'] < (1.2e10 * np.exp(0.84 * params_field['mag']))
+    ]
+    # r_90 vs r_10
+    params_field = params_field[
+        params_field['r_90_arcsec'] < (12.0000 * params_field['r_10_arcsec'] + 20.0000)
+    ]
+    # r_90 vs re
+    params_field = params_field[
+        params_field['r_90_arcsec'] < (3.0 * params_field['re_arcsec'] + 9.0000)
+    ]
+    # mu_median vs re
+    params_field = params_field[
+        params_field['mu_median'] < (4.0 * params_field['re_arcsec'] + 4.0000)
+    ]
+    # mu_median vs r_10
+    params_field = params_field[
+        params_field['mu_median'] < (4.0 * params_field['r_10_arcsec'] + 12.0000)
+    ]
+    # mu_median vs r_90
+    params_field = params_field[
+        params_field['mu_median'] < (0.3 * params_field['r_90_arcsec'] + 15.0000)
+    ]
+    # mu_max vs r_90
+    params_field = params_field[
+        params_field['mu_max'] < (120.0 * params_field['r_90_arcsec'] + 650.0000)
+    ]
+
+    # params_field = params_field.loc[
+    #     (params_field['mu'] > mu_min)
+    #     & (params_field['re_arcsec'] > reff_min)
+    #     & (params_field['axis_ratio'] > 0.1)
+    # ].reset_index(drop=True)
+    # # Remove streaks
+    # params_field = params_field[
+    #     (params_field['axis_ratio'] >= 0.17) | (params_field['n_pix'] <= 1000)
+    # ]
+
+    # Remove previous index and reset
+    params_field = params_field.reset_index(drop=True)
 
     return params_field, mto_all
 
 
-def source_detection(image, thresh=3.0, minarea=5):
+def source_detection(
+    image,
+    header,
+    file_path,
+    star_df,
+    thresh=3.0,
+    minarea=5,
+    deblend_nthresh=32,
+    deblend_cont=0.005,
+    save_segmap=False,
+):
     """
     Source detection using SEP (Source Extractor in Python).
 
@@ -233,21 +308,43 @@ def source_detection(image, thresh=3.0, minarea=5):
         bkg (sep.Background): The background estimation model.
         segmap (numpy.ndarray): The segmentation map.
     """
-    logger.info('starting sep')
-    image_c = image.byteswap().newbyteorder()
-    bkg = sep.Background(image_c, maskthresh=thresh, bw=128)  # noqa: F821
-    data_sub = image_c - bkg
-    objects, segmap = sep.extract(  # noqa: F821
+    logger.debug('starting sep')
+    sep_start = time.time()
+    bkg = sep.Background(image, maskthresh=thresh, bw=100)
+    data_sub = image - bkg
+    objects, segmap = sep.extract(
         data_sub,
         thresh=thresh,
         err=bkg.globalrms,
         minarea=minarea,
         segmentation_map=True,
-        deblend_nthresh=32,
-        deblend_cont=0.005,
+        deblend_nthresh=deblend_nthresh,
+        deblend_cont=deblend_cont,
     )
-    logger.info('finished sep')
-    return objects, data_sub, bkg, segmap
+    logger.debug(f'finished sep in {time.time()-sep_start:.2f} seconds.')
+
+    if save_segmap:
+        directory, filename = os.path.split(file_path)
+        name, extension = os.path.splitext(filename)
+
+        filename_seg = f'{name}_sep_seg{extension}'
+        out_path_seg = os.path.join(directory, filename_seg)
+        seg_hdu = fits.PrimaryHDU(data=segmap.astype(np.float32), header=header)
+        seg_hdu.writeto(out_path_seg, overwrite=True)
+
+    # Convert the structured numpy array to a DataFrame and ensure it's a copy
+    objects_df = pd.DataFrame(objects).copy()
+    # add world coordinates to df
+    objects_df['ra'], objects_df['dec'] = WCS(header).all_pix2world(
+        objects_df['x'], objects_df['y'], 0
+    )
+    # match detections to gaia stars
+    det_matching_idx, _, _, _ = match_stars(objects_df, star_df, max_sep=1.5)
+    objects_df['star'] = 0
+    objects_df.loc[det_matching_idx, 'star'] = 1
+    objects_df.insert(0, 'ID', objects_df.index + 1)
+
+    return objects_df, data_sub, bkg, segmap
 
 
 def detect_anomaly(

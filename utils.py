@@ -1,11 +1,13 @@
 import ast
 import os
 import re
+import shutil
 import time
 from itertools import combinations
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 # import sep
 from astropy import units as u
@@ -419,7 +421,8 @@ def extract_tile_numbers_from_job(s):
     # Remove the outer parentheses and split by comma
     parts = s.strip('()').split(',')
     # Extract the numbers from each part
-    numbers = [int(part.split('(')[1].split(')')[0]) for part in parts]
+    # numbers = [int(part.split('(')[1].split(')')[0]) for part in parts]
+    numbers = [int(part) for part in parts]
     return tuple(numbers)
 
 
@@ -577,3 +580,40 @@ def create_cartesian_kdtree(ra, dec):
     xyz = coords.cartesian.xyz.value.T
     tree = cKDTree(xyz)
     return tree, coords
+
+
+def delete_folder_contents(folder_path):
+    logger.info(f'Deleting contents of folder: {folder_path}')
+    for item in os.listdir(folder_path):
+        item_path = os.path.join(folder_path, item)
+        if os.path.isfile(item_path):
+            os.remove(item_path)
+        elif os.path.isdir(item_path):
+            shutil.rmtree(item_path)
+
+
+def read_parquet(parquet_path, ra_range, dec_range, columns=None):
+    """
+    Read parquet file and return a pandas dataframe.
+
+    Args:
+        parquet_path (str): path to parquet file
+        ra_range (tuple): range of right ascension to select
+        dec_range (tuple): range of declination to select
+        columns (list): columns to select
+
+    Returns:
+        df (dataframe): pandas dataframe containing the selected data
+    """
+    logger.debug('Reading redshift catalog.')
+    filter_coords = [
+        ('ra', '>=', ra_range[0]),
+        ('ra', '<=', ra_range[1]),
+        ('dec', '>=', dec_range[0]),
+        ('dec', '<=', dec_range[1]),
+    ]
+    df = pq.read_table(parquet_path, memory_map=True, filters=filter_coords).to_pandas()
+    if columns:
+        df = df[columns]
+    logger.debug(f'Read {len(df)} objects from catalog {os.path.basename(parquet_path)}.')
+    return df
