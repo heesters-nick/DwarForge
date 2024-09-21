@@ -211,19 +211,19 @@ def param_phot(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6):
 
     conditions = {
         'mu': (mu_lim, None),  # (min, max), None means no limit
-        're_arcsec': (re_lim, 55.0),
-        'axis_ratio': (0.17, None),
-        'r_10_arcsec': (0.39, 19.0),
-        'r_25_arcsec': (0.7, None),
-        'r_75_arcsec': (1.98, None),
-        'r_90_arcsec': (2.3, 150.0),
-        'r_100_arcsec': (2.0, None),
-        'r_fwhm_arcsec': (0.4, 10.6),
-        'mu_median': (0.3, 29.0),
-        'mu_mean': (0.4, 70.0),
-        'mu_max': (1.7, 5700.0),
-        'total_flux': (55, None),
-        'mag': (13.8, 25.7),
+        're_arcsec': (re_lim, None),
+        # 'axis_ratio': (0.17, None),
+        # 'r_10_arcsec': (0.39, 19.0),
+        # 'r_25_arcsec': (0.7, None),
+        # 'r_75_arcsec': (1.98, None),
+        # 'r_90_arcsec': (2.3, 150.0),
+        # 'r_100_arcsec': (2.0, None),
+        # 'r_fwhm_arcsec': (0.4, 10.6),
+        # 'mu_median': (0.3, 29.0),
+        # 'mu_mean': (0.4, 70.0),
+        # 'mu_max': (1.7, 5700.0),
+        # 'total_flux': (55, None),
+        # 'mag': (13.8, 25.7),
     }
 
     for column, (min_val, max_val) in conditions.items():
@@ -236,36 +236,36 @@ def param_phot(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6):
     params_field = params_field[
         (params_field['axis_ratio'] >= 0.17) | (params_field['n_pix'] <= 1000)
     ]
-    # mag vs mu filter
-    params_field = params_field[params_field['mu'] > (0.6060 * params_field['mag'] + 11.6293)]
-    # mag vs mu_max filter
-    params_field = params_field[
-        params_field['mu_max'] < (1.2e10 * np.exp(0.84 * params_field['mag']))
-    ]
-    # r_90 vs r_10
-    params_field = params_field[
-        params_field['r_90_arcsec'] < (12.0000 * params_field['r_10_arcsec'] + 20.0000)
-    ]
-    # r_90 vs re
-    params_field = params_field[
-        params_field['r_90_arcsec'] < (3.0 * params_field['re_arcsec'] + 9.0000)
-    ]
-    # mu_median vs re
-    params_field = params_field[
-        params_field['mu_median'] < (4.0 * params_field['re_arcsec'] + 4.0000)
-    ]
-    # mu_median vs r_10
-    params_field = params_field[
-        params_field['mu_median'] < (4.0 * params_field['r_10_arcsec'] + 12.0000)
-    ]
-    # mu_median vs r_90
-    params_field = params_field[
-        params_field['mu_median'] < (0.3 * params_field['r_90_arcsec'] + 15.0000)
-    ]
-    # mu_max vs r_90
-    params_field = params_field[
-        params_field['mu_max'] < (120.0 * params_field['r_90_arcsec'] + 650.0000)
-    ]
+    # # mag vs mu filter
+    # params_field = params_field[params_field['mu'] > (0.6060 * params_field['mag'] + 11.6293)]
+    # # mag vs mu_max filter
+    # params_field = params_field[
+    #     params_field['mu_max'] < (1.2e10 * np.exp(0.84 * params_field['mag']))
+    # ]
+    # # r_90 vs r_10
+    # params_field = params_field[
+    #     params_field['r_90_arcsec'] < (12.0000 * params_field['r_10_arcsec'] + 20.0000)
+    # ]
+    # # r_90 vs re
+    # params_field = params_field[
+    #     params_field['r_90_arcsec'] < (3.0 * params_field['re_arcsec'] + 9.0000)
+    # ]
+    # # mu_median vs re
+    # params_field = params_field[
+    #     params_field['mu_median'] < (4.0 * params_field['re_arcsec'] + 4.0000)
+    # ]
+    # # mu_median vs r_10
+    # params_field = params_field[
+    #     params_field['mu_median'] < (4.0 * params_field['r_10_arcsec'] + 12.0000)
+    # ]
+    # # mu_median vs r_90
+    # params_field = params_field[
+    #     params_field['mu_median'] < (0.3 * params_field['r_90_arcsec'] + 15.0000)
+    # ]
+    # # mu_max vs r_90
+    # params_field = params_field[
+    #     params_field['mu_max'] < (120.0 * params_field['r_90_arcsec'] + 650.0000)
+    # ]
 
     # params_field = params_field.loc[
     #     (params_field['mu'] > mu_min)
@@ -309,9 +309,18 @@ def source_detection(
         segmap (numpy.ndarray): The segmentation map.
     """
     logger.debug('starting sep')
+    # avoid changing the original image
+    image_copy = image.copy()
+    # set zeros to nan so sep can ignore them
+    image_copy[image_copy == 0] = np.nan
+
     sep_start = time.time()
-    bkg = sep.Background(image, maskthresh=thresh, bw=100)
-    data_sub = image - bkg
+    bkg = sep.Background(image_copy, maskthresh=thresh, bw=100)
+    # non-zero mask
+    mask = image != 0
+    # only subtract background where the image is non-zero
+    data_sub = np.where(mask, image_copy - bkg.back(), image_copy)
+    # detect objects
     objects, segmap = sep.extract(
         data_sub,
         thresh=thresh,
@@ -343,6 +352,9 @@ def source_detection(
     objects_df['star'] = 0
     objects_df.loc[det_matching_idx, 'star'] = 1
     objects_df.insert(0, 'ID', objects_df.index + 1)
+
+    # set nan values back to 0
+    data_sub[np.isnan(data_sub)] = 0.0
 
     return objects_df, data_sub, bkg, segmap
 

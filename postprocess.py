@@ -512,14 +512,18 @@ def add_redshifts(det_df, z_class_cat):
         ra_range=ra_range,
         dec_range=dec_range,
     )
-    # match detections to redshift and class catalog
-    det_idx_z_class, label_matches_z_class, _, _ = match_stars(det_df, class_z_df, max_sep=5.0)
-    det_idx_z_class = det_idx_z_class.astype(np.int32)  # make sure index is int
 
-    # add redshift and class labels to detections dataframe
-    det_df.loc[:, 'class_label'] = np.nan
-    det_df.loc[:, 'zspec'] = np.nan
-    det_df.loc[det_idx_z_class, 'class_label'] = label_matches_z_class['cspec'].values
-    det_df.loc[det_idx_z_class, 'zspec'] = label_matches_z_class['zspec'].values
+    det_df['class_label'] = np.nan
+    det_df['zspec'] = np.nan
+
+    if len(class_z_df) > 0:
+        # match detections to redshift and class catalog
+        det_idx_z_class, label_matches_z_class, _, _ = match_stars(det_df, class_z_df, max_sep=5.0)
+        det_idx_z_class = det_idx_z_class.astype(np.int32)  # make sure index is int
+
+        if len(det_idx_z_class) > 0:
+            # add redshift and class labels to detections dataframe
+            det_df.loc[det_idx_z_class, 'class_label'] = label_matches_z_class['cspec'].values
+            det_df.loc[det_idx_z_class, 'zspec'] = label_matches_z_class['zspec'].values
 
     return det_df

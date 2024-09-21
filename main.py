@@ -51,6 +51,7 @@ from utils import (  # noqa: E402
     delete_file,
     delete_folder_contents,
     extract_tile_numbers,
+    is_mostly_zeros,
     load_available_tiles,
     tile_str,
     update_available_tiles,
@@ -157,11 +158,11 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'cfis_lsb-r'
+anchor_band = 'whigs-g'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
-process_only_known_dwarfs = False
+process_only_known_dwarfs = True
 # define the square cutout size in pixels
 cutout_size = 64
 # minimum surface brightness to select objects
@@ -557,84 +558,92 @@ def process_tile_for_band(
         logger.info(f'Started processing tile {tile_str(tile)}, band {band}.')
 
         try:
-            # Preprocess (bin)
-            binned_data, prepped_data, prepped_path, prepped_header = prep_tile(
-                tile, final_path, fits_ext, zp, bin_size=4
-            )
-
-            # Run detection
-            param_path = run_mto(
-                file_path=prepped_path,
-                band=band,
-                with_segmap=True,
-                move_factor=0.39,
-                min_distance=0.0,
-            )
-            # Calculate photometric parameters
-            mto_det, mto_all = param_phot(
-                param_path, header=prepped_header, zp=zp, mu_lim=mu_lim, re_lim=re_lim
-            )
-
-            # Match detections with catalog
-            if input_catalog is not None:
-                clear_warnings()
-                mto_det, matching_stats = add_labels(
-                    tile,
-                    band,
-                    det_df=mto_det,
-                    det_df_full=mto_all,
-                    dwarfs_df=input_catalog,
-                    fits_path=prepped_path,
-                    fits_ext=fits_ext,
-                    header=prepped_header,
-                    z_class_cat=z_class_cat,
+            if is_mostly_zeros(file_path=final_path, fits_ext=fits_ext):
+                tile_info['status'] = 'skipped_mostly_zeros'
+                logger.info(
+                    f'Skipped tile {tile_str(tile)}, band {band} as it contains mostly zeros.'
                 )
-                tile_info.update(matching_stats)
-
-                match_warnings = get_warnings()
-                if match_warnings:
-                    tile_info['status'] = 'failed'
-                    tile_info['error_message'] = '\n\t'.join(match_warnings)
-
-            # save filtered MTO detections
-            mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
-            mto_all.to_csv(param_path, index=False)
-
-            tile_info['detection_count'] = len(mto_det)
-
-            # make cutouts
-            if cut_objects:
-                segmap = load_segmap(prepped_path)
-                cutouts = make_cutouts(
-                    binned_data,
-                    tile_str=tile_str(tile),
-                    df=mto_det,
-                    segmap=segmap,
-                    cutout_size=cut_size,
-                )
-                path, _ = os.path.splitext(final_path)
-                cutout_path = f'{path}_cutouts.h5'
-                save_to_h5(
-                    stacked_cutout=cutouts,
-                    object_df=mto_det,
-                    tile_numbers=tile,
-                    save_path=cutout_path,
-                )
-
-            # delete raw data
-            delete_file(final_path)
-
-            if tile_info['status'] != 'failed':
-                tile_info['status'] = 'completed'
-                logger.info(f'Successfully processed tile {tile_str(tile)}, band {band}.')
-                # delete rebinned data + full MTO parameter file only when processing finished without errors
-                delete_file(param_path)
-                delete_file(prepped_path)
-
+                tile_info['detection_count'] = 0
+                delete_file(final_path)
             else:
-                logger.warning(
-                    f'Warning was raised while matching to catalog. Revisit tile {tile_str(tile)}, band {band}.'
+                # Preprocess (bin)
+                binned_data, prepped_data, prepped_path, prepped_header = prep_tile(
+                    tile, final_path, fits_ext, zp, bin_size=4
                 )
+
+                # Run detection
+                param_path = run_mto(
+                    file_path=prepped_path,
+                    band=band,
+                    with_segmap=True,
+                    move_factor=0.39,
+                    min_distance=0.0,
+                )
+                # Calculate photometric parameters
+                mto_det, mto_all = param_phot(
+                    param_path, header=prepped_header, zp=zp, mu_lim=mu_lim, re_lim=re_lim
+                )
+
+                # Match detections with catalog
+                if input_catalog is not None:
+                    clear_warnings()
+                    mto_det, matching_stats = add_labels(
+                        tile,
+                        band,
+                        det_df=mto_det,
+                        det_df_full=mto_all,
+                        dwarfs_df=input_catalog,
+                        fits_path=prepped_path,
+                        fits_ext=fits_ext,
+                        header=prepped_header,
+                        z_class_cat=z_class_cat,
+                    )
+                    tile_info.update(matching_stats)
+
+                    match_warnings = get_warnings()
+                    if match_warnings:
+                        tile_info['status'] = 'failed'
+                        tile_info['error_message'] = '\n\t'.join(match_warnings)
+
+                # save filtered MTO detections
+                mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
+                mto_all.to_csv(param_path, index=False)
+
+                tile_info['detection_count'] = len(mto_det)
+
+                # make cutouts
+                if cut_objects:
+                    segmap = load_segmap(prepped_path)
+                    cutouts = make_cutouts(
+                        binned_data,
+                        tile_str=tile_str(tile),
+                        df=mto_det,
+                        segmap=segmap,
+                        cutout_size=cut_size,
+                    )
+                    path, _ = os.path.splitext(final_path)
+                    cutout_path = f'{path}_cutouts.h5'
+                    save_to_h5(
+                        stacked_cutout=cutouts,
+                        object_df=mto_det,
+                        tile_numbers=tile,
+                        save_path=cutout_path,
+                    )
+
+                # delete raw data
+                delete_file(final_path)
+
+                if tile_info['status'] != 'failed':
+                    tile_info['status'] = 'completed'
+                    logger.info(f'Successfully processed tile {tile_str(tile)}, band {band}.')
+                    # delete rebinned data + full MTO parameter file only when processing finished without errors
+                    delete_file(param_path)
+                    delete_file(prepped_path)
+
+                else:
+                    logger.warning(
+                        f'Warning was raised while matching to catalog. Revisit tile {tile_str(tile)}, band {band}.'
+                    )
 
         except Exception as e:
             tile_info['status'] = 'failed'
@@ -923,7 +932,7 @@ def main(
 
         # Start a shutdown worker to handle remaining items in the process queue
         shutdown_thread = threading.Thread(
-            target=shutdown_worker, args=(process_queue, db_lock, all_downloads_complete)
+            target=shutdown_worker, args=(database, process_queue, db_lock, all_downloads_complete)
         )
         shutdown_thread.start()
 

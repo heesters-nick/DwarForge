@@ -19,13 +19,14 @@ class GracefulKiller:
         self.kill_now = True
 
 
-def shutdown_worker(process_queue, db_lock, all_downloads_complete):
+def shutdown_worker(database, process_queue, db_lock, all_downloads_complete):
     logger.info('Shutdown worker started')
     while not process_queue.empty():
         try:
             tile, band, final_path, fits_ext, zp = process_queue.get(timeout=1)
             # Update the database to mark this job as interrupted
             update_tile_info(
+                database,
                 {
                     'tile': tile,
                     'band': band,

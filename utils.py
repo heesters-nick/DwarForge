@@ -617,3 +617,13 @@ def read_parquet(parquet_path, ra_range, dec_range, columns=None):
         df = df[columns]
     logger.debug(f'Read {len(df)} objects from catalog {os.path.basename(parquet_path)}.')
     return df
+
+
+def is_mostly_zeros(file_path, fits_ext):
+    data, header = open_fits(file_path, fits_ext)
+
+    frac_zeros = np.count_nonzero(data == 0.0) / len(data.flatten())
+    if frac_zeros > 0.9:
+        return True
+    else:
+        return False

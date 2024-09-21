@@ -29,7 +29,7 @@ from utils import (
     tile_str,
 )
 
-sep.set_extract_pixstack(500000)
+sep.set_extract_pixstack(200000)
 
 logger = get_logger()
 
@@ -181,7 +181,7 @@ def replace_with_local_background(
                 star_region_reduced, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA
             )
             if spike_len > 0:
-                l_reduced = max(int(np.round(spike_len * 0.4)), 1)
+                l_reduced = max(round(spike_len * 0.4), 1)
                 cv2.drawMarker(
                     star_region_reduced,
                     (local_x, local_y),
@@ -867,9 +867,7 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
     logger.debug(f'{tile_str(tile)}: estimated background in {time.time()-start:.2f} seconds.')
     # mask hot pixels
     start = time.time()
-    data_ano_mask, hot_mask = mask_hot_pixels(
-        data_ano_mask, threshold=70, bkg=bkg, max_size=3, sigma=5
-    )
+    data_ano_mask, _ = mask_hot_pixels(data_ano_mask, threshold=70, bkg=bkg, max_size=3, sigma=5)
     logger.debug(f'{tile_str(tile)}: masked hot pixels in {time.time()-start:.2f} seconds.')
     # find stars in the image from gaia
     star_df = find_stars(tile_str(tile), header_binned)
@@ -889,7 +887,7 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
         # get photometry of tiny objects
         pixel_scale = abs(header_binned['CD1_1'] * 3600)
         objects_sep = aperture_photometry_mag_auto(
-            data_sub_sep, objects_sep, zp=30.0, pixel_scale=pixel_scale
+            data_sub_sep, objects_sep, zp=30, pixel_scale=pixel_scale
         )
         start = time.time()
 
@@ -910,6 +908,14 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
         logger.debug(f'Small stuff masked in {time.time()-start:.2f} seconds.')
     except Exception as e:
         logger.error(f'Error using SEP: {e}')
+        # Create background statistics map
+        bkg_mean, bkg_median, bkg_std = (
+            np.zeros((100, 100), dtype=np.float32),
+            np.zeros((100, 100), dtype=np.float32),
+            np.ones((100, 100), dtype=np.float32),
+        )
+        segmap_updated = np.zeros_like(data_ano_mask, dtype=np.float32)
+        objects_updated = pd.DataFrame()
 
     start = time.time()
     # find and mask dim stars up to a magnitude of gmag_lim
