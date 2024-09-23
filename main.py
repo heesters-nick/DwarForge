@@ -16,7 +16,7 @@ from logging_setup import setup_logger
 
 logger = setup_logger(
     log_dir='./logs',
-    name='dwarforge',
+    name='dwarforge_i',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -158,11 +158,11 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'whigs-g'
+anchor_band = 'ps-i'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
-process_only_known_dwarfs = True
+process_only_known_dwarfs = False
 # define the square cutout size in pixels
 cutout_size = 64
 # minimum surface brightness to select objects
@@ -581,7 +581,12 @@ def process_tile_for_band(
                 )
                 # Calculate photometric parameters
                 mto_det, mto_all = param_phot(
-                    param_path, header=prepped_header, zp=zp, mu_lim=mu_lim, re_lim=re_lim
+                    param_path,
+                    header=prepped_header,
+                    zp=zp,
+                    mu_lim=mu_lim,
+                    re_lim=re_lim,
+                    band=band,
                 )
 
                 # Match detections with catalog

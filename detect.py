@@ -175,7 +175,7 @@ def run_mto(
     return param_path
 
 
-def param_phot(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6):
+def param_phot_old(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6, band='cfis_lsb-r'):
     params_field = pd.read_csv(param_path)
     params_field['ra'], params_field['dec'] = WCS(header).all_pix2world(
         params_field['X'], params_field['Y'], 0
@@ -209,22 +209,75 @@ def param_phot(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6):
     )
     mto_all = params_field.copy()
 
-    conditions = {
-        'mu': (mu_lim, None),  # (min, max), None means no limit
-        're_arcsec': (re_lim, None),
-        # 'axis_ratio': (0.17, None),
-        # 'r_10_arcsec': (0.39, 19.0),
-        # 'r_25_arcsec': (0.7, None),
-        # 'r_75_arcsec': (1.98, None),
-        # 'r_90_arcsec': (2.3, 150.0),
-        # 'r_100_arcsec': (2.0, None),
-        # 'r_fwhm_arcsec': (0.4, 10.6),
-        # 'mu_median': (0.3, 29.0),
-        # 'mu_mean': (0.4, 70.0),
-        # 'mu_max': (1.7, 5700.0),
-        # 'total_flux': (55, None),
-        # 'mag': (13.8, 25.7),
-    }
+    if band == 'cfis_lsb-r':
+        conditions = {
+            'mu': (mu_lim, None),  # (min, max), None means no limit
+            're_arcsec': (re_lim, None),
+            'axis_ratio': (0.17, None),
+            'r_10_arcsec': (0.39, 19.0),
+            'r_25_arcsec': (0.7, None),
+            'r_75_arcsec': (1.98, None),
+            'r_90_arcsec': (2.3, 150.0),
+            'r_100_arcsec': (2.0, None),
+            'r_fwhm_arcsec': (0.4, 10.6),
+            'mu_median': (0.3, 29.0),
+            'mu_mean': (0.4, 70.0),
+            'mu_max': (1.7, 5700.0),
+            'total_flux': (55, None),
+            'mag': (13.8, 25.7),
+        }
+    elif band == 'whigs-g':
+        conditions = {
+            'mu': (mu_lim, None),  # (min, max), None means no limit
+            're_arcsec': (re_lim, None),
+            # 'axis_ratio': (0.17, None),
+            # 'r_10_arcsec': (0.39, 19.0),
+            # 'r_25_arcsec': (0.7, None),
+            # 'r_75_arcsec': (1.98, None),
+            # 'r_90_arcsec': (2.3, 150.0),
+            # 'r_100_arcsec': (2.0, None),
+            # 'r_fwhm_arcsec': (0.4, 10.6),
+            # 'mu_median': (0.3, 29.0),
+            # 'mu_mean': (0.4, 70.0),
+            # 'mu_max': (1.7, 5700.0),
+            # 'total_flux': (55, None),
+            # 'mag': (13.8, 25.7),
+        }
+    elif band == 'ps-i':
+        conditions = {
+            'mu': (mu_lim, None),  # (min, max), None means no limit
+            're_arcsec': (re_lim, None),
+            'axis_ratio': (0.17, None),
+            'r_10_arcsec': (0.39, 19.0),
+            'r_25_arcsec': (0.7, None),
+            'r_75_arcsec': (1.98, None),
+            'r_90_arcsec': (2.3, 150.0),
+            'r_100_arcsec': (2.0, None),
+            'r_fwhm_arcsec': (0.4, 10.6),
+            'mu_median': (0.3, 29.0),
+            'mu_mean': (0.4, 70.0),
+            'mu_max': (1.7, 5700.0),
+            'total_flux': (55, None),
+            'mag': (13.8, 25.7),
+        }
+    else:
+        logger.warning(f'No custom cuts implemented yet for band {band}. Using r-band cuts.')
+        conditions = {
+            'mu': (mu_lim, None),  # (min, max), None means no limit
+            're_arcsec': (re_lim, None),
+            'axis_ratio': (0.17, None),
+            'r_10_arcsec': (0.39, 19.0),
+            'r_25_arcsec': (0.7, None),
+            'r_75_arcsec': (1.98, None),
+            'r_90_arcsec': (2.3, 150.0),
+            'r_100_arcsec': (2.0, None),
+            'r_fwhm_arcsec': (0.4, 10.6),
+            'mu_median': (0.3, 29.0),
+            'mu_mean': (0.4, 70.0),
+            'mu_max': (1.7, 5700.0),
+            'total_flux': (55, None),
+            'mag': (13.8, 25.7),
+        }
 
     for column, (min_val, max_val) in conditions.items():
         if min_val is not None:
@@ -278,6 +331,154 @@ def param_phot(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6):
     # ]
 
     # Remove previous index and reset
+    params_field = params_field.reset_index(drop=True)
+
+    return params_field, mto_all
+
+
+def param_phot(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6, band='cfis_lsb-r'):
+    params_field = pd.read_csv(param_path)
+    params_field['ra'], params_field['dec'] = WCS(header).all_pix2world(
+        params_field['X'], params_field['Y'], 0
+    )
+    pixel_scale = abs(header['CD1_1'] * 3600)
+    params_field['re_arcsec'] = params_field.R_e * pixel_scale
+    params_field['r_fwhm_arcsec'] = params_field.R_fwhm * pixel_scale
+    params_field['r_10_arcsec'] = params_field.R10 * pixel_scale
+    params_field['r_25_arcsec'] = params_field.R25 * pixel_scale
+    params_field['r_75_arcsec'] = params_field.R75 * pixel_scale
+    params_field['r_90_arcsec'] = params_field.R90 * pixel_scale
+    params_field['r_100_arcsec'] = params_field.R100 * pixel_scale
+    params_field['A_arcsec'] = params_field.A * pixel_scale
+    params_field['B_arcsec'] = params_field.B * pixel_scale
+    params_field['axis_ratio'] = np.minimum(
+        params_field['A_arcsec'], params_field['B_arcsec']
+    ) / np.maximum(params_field['A_arcsec'], params_field['B_arcsec'])
+    params_field['mag'] = -2.5 * np.log10(params_field.total_flux) + zp
+    params_field['mu'] = np.where(
+        (params_field['A_arcsec'] > 0) & (params_field['B_arcsec'] > 0),
+        params_field.mag
+        + 0.752
+        + 2.5
+        * np.log10(
+            np.pi * params_field.re_arcsec**2 * params_field.B_arcsec / params_field.A_arcsec
+        ),
+        params_field.mag + 0.752 + 2.5 * np.log10(np.pi * params_field.re_arcsec**2),
+    )
+    params_field = params_field[~params_field.isin([np.inf, -np.inf]).any(axis=1)].reset_index(
+        drop=True
+    )
+    mto_all = params_field.copy()
+
+    # Define band-specific conditions
+    band_conditions = {
+        'cfis_lsb-r': {
+            'basic': {
+                'mu': (mu_lim, None),
+                're_arcsec': (re_lim, 55.0),
+                'axis_ratio': (0.17, None),
+                'r_10_arcsec': (0.39, 19.0),
+                'r_90_arcsec': (2.3, 150.0),
+                'r_fwhm_arcsec': (0.4, 10.6),
+                'mu_median': (0.3, 29.0),
+                'mu_mean': (0.4, 70.0),
+                'mu_max': (1.1, 5700.0),
+                'total_flux': (55, None),
+                'mag': (13.8, 25.7),
+            },
+            'complex': [
+                lambda df: df['mu'] > (0.6060 * df['mag'] + 11.6293),
+                lambda df: df['mu_max'] < (1.2e10 * np.exp(0.84 * df['mag'])),
+                lambda df: df['r_90_arcsec'] < (12.0000 * df['r_10_arcsec'] + 20.0000),
+                lambda df: df['r_90_arcsec'] < (3.0 * df['re_arcsec'] + 9.0000),
+                lambda df: df['mu_median'] < (4.0 * df['re_arcsec'] + 4.0000),
+                lambda df: df['mu_median'] < (4.0 * df['r_10_arcsec'] + 12.0000),
+                lambda df: df['mu_median'] < (0.3 * df['r_90_arcsec'] + 15.0000),
+                lambda df: df['mu_max'] < (120.0 * df['r_90_arcsec'] + 650.0000),
+            ],
+        },
+        'whigs-g': {
+            'basic': {
+                'mu': (mu_lim, None),
+                're_arcsec': (re_lim, 55.0),
+                'axis_ratio': (0.17, None),
+                'r_10_arcsec': (0.39, 8.0),
+                'r_90_arcsec': (2.5, 40.0),
+                'r_fwhm_arcsec': (0.4, 7.5),
+                'mu_median': (0.1, 12.0),
+                'mu_mean': (0.25, 17.3),
+                'mu_max': (1.7, 2600.0),
+                'total_flux': (39, None),
+                'mag': (15.3, 23.0),
+            },
+            'complex': [
+                lambda df: df['mu'] > (0.6981 * df['mag'] + 8.7072),
+                lambda df: df['mu_max'] < (-20.0 * df['mag'] + 500.0),
+                lambda df: df['r_90_arcsec'] > (4.3025 * df['r_10_arcsec'] - 1.5000),
+                lambda df: df['r_90_arcsec'] < (1.9000 * df['re_arcsec'] + 3.5000),
+                lambda df: df['mu_median'] < (0.1500 * df['re_arcsec'] + 3.3),
+                lambda df: df['mu_median'] < (3.0 * df['r_10_arcsec'] + 1.0000),
+                lambda df: df['mu_median'] < (0.0800 * df['r_90_arcsec'] + 3.5),
+                lambda df: df['mu_max'] < (14.0 * df['r_90_arcsec'] + 20),
+            ],
+        },
+        'ps-i': {
+            'basic': {
+                'mu': (mu_lim, None),  # (min, max), None means no limit
+                're_arcsec': (re_lim, 46.0),
+                'axis_ratio': (0.17, None),
+                'r_10_arcsec': (0.39, 16.2),
+                'r_90_arcsec': (2.51, 85.0),
+                'r_fwhm_arcsec': (0.4, 14.2),
+                'mu_median': (0.35, 34.0),
+                'mu_mean': (0.4, 103.0),
+                'mu_max': (2, 8300.0),
+                'total_flux': (68, None),
+                'mag': (15.8, 25.3),
+            },
+            'complex': [
+                lambda df: df['mu'] > (0.5864 * df['mag'] + 11.9705),
+                lambda df: df['mu_max']
+                < (
+                    5593.3712
+                    / (1 + np.exp(0.9174 * (df['mag'] - 16.1930)))
+                    * np.exp(-0.0000 * df['mag'])
+                    + 200.0000
+                ),
+                lambda df: df['r_90_arcsec'] < (12.0000 * df['r_10_arcsec'] + 3.0),
+                lambda df: df['r_90_arcsec'] < (3.0 * df['re_arcsec'] + 3.8),
+                lambda df: df['mu_median'] < (2.0 * df['re_arcsec'] + 8.0000),
+                lambda df: df['mu_median'] < (4.0 * df['r_10_arcsec'] + 12.0000),
+                lambda df: df['mu_median'] < (4 * df['r_90_arcsec'] + 9.5),
+                lambda df: df['mu_max'] < (35 * df['r_90_arcsec'] + 100.0000),
+                lambda df: df['r_25_arcsec'] < (2.5 * df['r_10_arcsec'] + 1.0000),
+            ],
+        },
+    }
+
+    if band not in band_conditions:
+        print(f'Conditions not implemented for band {band}.')
+        return None
+
+    conditions = band_conditions[band]
+
+    # Apply basic conditions
+    for column, (min_val, max_val) in conditions['basic'].items():
+        if min_val is not None:
+            params_field = params_field[params_field[column] > min_val]
+        if max_val is not None:
+            params_field = params_field[params_field[column] < max_val]
+
+    # Apply complex conditions
+    for condition in conditions['complex']:
+        params_field = params_field[condition]
+
+    # Remove streaks
+    params_field = params_field[
+        (params_field['axis_ratio'] >= 0.17) | (params_field['n_pix'] <= 1000)
+    ]
+
+    # Reset index
     params_field = params_field.reset_index(drop=True)
 
     return params_field, mto_all
