@@ -14,7 +14,7 @@ from multiprocessing import (
 
 from logging_setup import setup_logger
 
-logger = setup_logger(
+setup_logger(
     log_dir='./logs',
     name='dwarforge_i',
     logging_level=logging.INFO,
@@ -610,11 +610,14 @@ def process_tile_for_band(
                         tile_info['status'] = 'failed'
                         tile_info['error_message'] = '\n\t'.join(match_warnings)
 
-                # save filtered MTO detections
-                mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
-                mto_all.to_csv(param_path, index=False)
+                if mto_det is not None and mto_all is not None:
+                    # save filtered MTO detections
+                    mto_det.to_parquet(os.path.splitext(param_path)[0] + '.parquet', index=False)
+                    mto_all.to_csv(param_path, index=False)
 
-                tile_info['detection_count'] = len(mto_det)
+                    tile_info['detection_count'] = len(mto_det)
+                else:
+                    tile_info['detection_count'] = 0
 
                 # make cutouts
                 if cut_objects:

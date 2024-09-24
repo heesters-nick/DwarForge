@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from logging_setup import setup_logger
 
-logger = setup_logger(
+setup_logger(
     log_dir='./logs',
     name='fuse_cutouts',
     logging_level=logging.INFO,
@@ -153,7 +153,7 @@ NUM_CORES = psutil.cpu_count(logical=False)  # Number of physical cores
 PREFETCH_FACTOR = 2  # Number of prefetched tiles per core
 
 ### paths ###
-platform = 'CANFAR'  #'CANFAR' #'Narval'
+platform = 'LOCAL'  #'CANFAR' #'Narval'
 if platform == 'CANFAR':
     root_dir_main = '/arc/home/heestersnick/dwarforge'
     root_dir_data = '/arc/projects/unions'
@@ -166,7 +166,10 @@ if platform == 'CANFAR':
     download_directory = os.path.join(root_dir_data, 'ssl/data/raw/tiles/dwarforge')
     cutout_directory = os.path.join(root_dir_main, 'cutouts')
     os.makedirs(cutout_directory, exist_ok=True)
-
+elif platform == 'LOCAL':
+    root_dir_main = '/home/nick/astro/DwarForge'
+    root_dir_data = '/home/nick/astro/DwarForge/data'
+    download_directory = '/media/nick/Passport/UNIONS'
 else:  # assume compute canada for now
     root_dir_main = '/home/heesters/projects/def-sfabbro/heesters/github/TileSlicer'
     root_dir_data_ashley = '/home/heesters/projects/def-sfabbro/a4ferrei/data'

@@ -458,7 +458,7 @@ def param_phot(param_path, header, zp=30.0, mu_lim=22.0, re_lim=1.6, band='cfis_
 
     if band not in band_conditions:
         print(f'Conditions not implemented for band {band}.')
-        return None
+        return None, None
 
     conditions = band_conditions[band]
 
