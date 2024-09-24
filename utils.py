@@ -369,6 +369,35 @@ class TileAvailability:
         ]
         return [tuple(tile) for tile in tile_array]
 
+    def get_tiles_for_bands(self, bands=None):
+        """
+        Get all tiles that are available in specified bands.
+        If no bands are specified, return all unique tiles.
+
+        Args:
+            bands (str or list): Band name(s) to check for availability.
+                                 Can be a single band name or a list of band names.
+
+        Returns:
+            list: List of tuples representing the tiles available in all specified bands.
+        """
+        if bands is None:
+            return self.unique_tiles
+
+        if isinstance(bands, str):
+            bands = [bands]
+
+        try:
+            band_indices = [list(self.band_dict.keys()).index(band) for band in bands]
+        except ValueError as e:
+            logger.error(f'Invalid band name: {e}')
+            return []
+
+        # Get tiles available in all specified bands
+        available_tiles = np.where(self.availability_matrix[:, band_indices].all(axis=1))[0]
+
+        return [self.unique_tiles[i] for i in available_tiles]
+
     def stats(self, band=None):
         logger.info('Number of currently available tiles per band:')
         max_band_name_length = max(map(len, self.band_dict.keys()))  # for output format

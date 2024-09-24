@@ -18,3 +18,4 @@ pyarrow
 concurrent-log-handler
 PyWavelets
 SQLAlchemy
+tqdm
