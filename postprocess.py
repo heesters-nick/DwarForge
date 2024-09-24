@@ -1,5 +1,4 @@
 import os
-import subprocess
 import time
 
 import h5py
@@ -7,10 +6,8 @@ import numpy as np
 import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from tqdm import tqdm
 
 from logging_setup import get_logger
-from tile_cutter import read_h5
 from utils import (
     check_corrupted_data,
     check_objects_in_neighboring_tiles,
@@ -550,129 +547,139 @@ def match_coordinates(reference_coords, target_coords, max_sep=15.0):
     return np.where(mask)[0], idx[mask]
 
 
-def fuse_cutouts(
-    parent_dir,
-    tiles,
-    in_dict,
-    band_names=['whigs-g', 'cfis_lsb-r', 'ps-i'],
-    parent_dir_destination=None,
-    download_file=False,
-):
-    logger.info(f'Starting to fuse cutouts for {len(tiles)} tiles in the bands: {band_names}')
-    print(f'First tile: {tiles[0]}')
-    for tile in tqdm(tiles):
-        all_band_data = {}
-        r_band_data = {}
+# def fuse_cutouts(
+#     parent_dir,
+#     tiles,
+#     in_dict,
+#     band_names=['whigs-g', 'cfis_lsb-r', 'ps-i'],
+#     parent_dir_destination=None,
+#     download_file=False,
+# ):
+#     logger.info(f'Starting to fuse cutouts for {len(tiles)} tiles in the bands: {band_names}')
+#     print(f'First tile: {tiles[0]}')
+#     for tile in tqdm(tiles):
+#         all_band_data = {}
+#         r_band_data = {}
 
-        try:
-            # Read data for all bands
-            for band in band_names:
-                zfill = in_dict[band]['zfill']
-                file_prefix = in_dict[band]['name']
-                delimiter = in_dict[band]['delimiter']
-                suffix = in_dict[band]['suffix']
-                num1, num2 = str(tile[0]).zfill(zfill), str(tile[1]).zfill(zfill)
-                tile_dir = f'{num1.zfill(3)}_{num2.zfill(3)}'
-                cutout_file = f'{file_prefix}{delimiter}{num1}{delimiter}{num2}{suffix}_cutouts.h5'
-                cutout_path = os.path.join(parent_dir, tile_dir, band, cutout_file)
-                cutout_dict = read_h5(cutout_path)
+#         tile_dir = f'{tile[0].zfill(3)}_{tile[1].zfill(3)}'
+#         # set outpath
+#         output_file = f'{tile_dir}_matched_cutouts.h5'
+#         out_dir = os.path.join(parent_dir, tile_dir, 'gri')
+#         os.makedirs(out_dir, exist_ok=True)
+#         output_path = os.path.join(out_dir, output_file)
+#         # skip if it already exists
+#         if os.path.isfile(output_path):
+#             continue
 
-                if band == 'cfis_lsb-r':
-                    r_band_data = cutout_dict.copy()
-                all_band_data[band] = {
-                    'cutouts': cutout_dict['images'],
-                    'ra': cutout_dict['ra'],
-                    'dec': cutout_dict['dec'],
-                }
+#         try:
+#             # Read data for all bands
+#             for band in band_names:
+#                 zfill = in_dict[band]['zfill']
+#                 file_prefix = in_dict[band]['name']
+#                 delimiter = in_dict[band]['delimiter']
+#                 suffix = in_dict[band]['suffix']
+#                 num1, num2 = str(tile[0]).zfill(zfill), str(tile[1]).zfill(zfill)
+#                 cutout_file = f'{file_prefix}{delimiter}{num1}{delimiter}{num2}{suffix}_cutouts.h5'
+#                 cutout_path = os.path.join(parent_dir, tile_dir, band, cutout_file)
+#                 cutout_dict = read_h5(cutout_path)
 
-            # Use r-band as reference
-            r_band = 'cfis_lsb-r'
-            r_band_coords = SkyCoord(
-                all_band_data[r_band]['ra'], all_band_data[r_band]['dec'], unit=u.deg
-            )
+#                 if band == 'cfis_lsb-r':
+#                     r_band_data = cutout_dict.copy()
+#                 all_band_data[band] = {
+#                     'cutouts': cutout_dict['images'],
+#                     'ra': cutout_dict['ra'],
+#                     'dec': cutout_dict['dec'],
+#                 }
 
-            # Match cutouts for each non-r band to r-band
-            matched_indices = {r_band: np.arange(len(all_band_data[r_band]['ra']))}
-            for band in band_names:
-                if band != r_band:
-                    target_coords = SkyCoord(
-                        all_band_data[band]['ra'], all_band_data[band]['dec'], unit=u.deg
-                    )
-                    matched_r_indices, matched_target_indices = match_coordinates(
-                        r_band_coords, target_coords
-                    )
-                    matched_indices[band] = (matched_r_indices, matched_target_indices)
+#             # Use r-band as reference
+#             r_band = 'cfis_lsb-r'
+#             r_band_coords = SkyCoord(
+#                 all_band_data[r_band]['ra'], all_band_data[r_band]['dec'], unit=u.deg
+#             )
 
-            # Find common matches across all bands
-            common_r_indices = matched_indices[r_band]
-            for band in band_names:
-                if band != r_band:
-                    common_r_indices = np.intersect1d(common_r_indices, matched_indices[band][0])
+#             # Match cutouts for each non-r band to r-band
+#             matched_indices = {r_band: np.arange(len(all_band_data[r_band]['ra']))}
+#             for band in band_names:
+#                 if band != r_band:
+#                     target_coords = SkyCoord(
+#                         all_band_data[band]['ra'], all_band_data[band]['dec'], unit=u.deg
+#                     )
+#                     matched_r_indices, matched_target_indices = match_coordinates(
+#                         r_band_coords, target_coords
+#                     )
+#                     matched_indices[band] = (matched_r_indices, matched_target_indices)
 
-            # Update matched indices for all bands based on common matches
-            final_indices = {r_band: common_r_indices}
-            for band in band_names:
-                if band != r_band:
-                    mask = np.isin(matched_indices[band][0], common_r_indices)
-                    final_indices[band] = matched_indices[band][1][mask]
+#             # Find common matches across all bands
+#             common_r_indices = matched_indices[r_band]
+#             for band in band_names:
+#                 if band != r_band:
+#                     common_r_indices = np.intersect1d(common_r_indices, matched_indices[band][0])
 
-            num_matched = len(common_r_indices)
-            logger.debug(f'Final number of matched cutouts: {num_matched}')
+#             # Update matched indices for all bands based on common matches
+#             final_indices = {r_band: common_r_indices}
+#             for band in band_names:
+#                 if band != r_band:
+#                     mask = np.isin(matched_indices[band][0], common_r_indices)
+#                     final_indices[band] = matched_indices[band][1][mask]
 
-            # Create the final array with shape (num_cutouts, num_bands, cutout_size, cutout_size)
-            cutout_size = all_band_data[r_band]['cutouts'].shape[1:]
-            final_cutouts = np.zeros((num_matched, len(band_names), *cutout_size), dtype=np.float32)
+#             num_matched = len(common_r_indices)
+#             logger.debug(f'Final number of matched cutouts: {num_matched}')
 
-            # Populate the final_cutouts array
-            for i, band in enumerate(band_names):
-                final_cutouts[:, i] = all_band_data[band]['cutouts'][final_indices[band]]
+#             # Create the final array with shape (num_cutouts, num_bands, cutout_size, cutout_size)
+#             cutout_size = all_band_data[r_band]['cutouts'].shape[1:]
+#             final_cutouts = np.zeros((num_matched, len(band_names), *cutout_size), dtype=np.float32)
 
-            # Create new .h5 file
-            output_file = f'{tile_dir}_matched_cutouts.h5'
-            out_dir = os.path.join(parent_dir, tile_dir, 'gri')
-            os.makedirs(out_dir, exist_ok=True)
-            output_path = os.path.join(out_dir, output_file)
+#             # Populate the final_cutouts array
+#             for i, band in enumerate(band_names):
+#                 final_cutouts[:, i] = all_band_data[band]['cutouts'][final_indices[band]]
 
-            dt = h5py.special_dtype(vlen=str)
-            with h5py.File(output_path, 'w', libver='latest') as f:
-                # Store the matched cutouts
-                f.create_dataset('images', data=final_cutouts.astype(np.float32))
-                # Store r-band ra and dec
-                f.create_dataset('ra', data=all_band_data[r_band]['ra'][final_indices[r_band]])
-                f.create_dataset('dec', data=all_band_data[r_band]['dec'][final_indices[r_band]])
-                f.create_dataset('tile', data=r_band_data['tile'], dtype=np.int32)
-                f.create_dataset(
-                    'known_id', data=r_band_data['known_id'][final_indices[r_band]], dtype=dt
-                )
-                f.create_dataset('mto_id', data=r_band_data['mto_id'][final_indices[r_band]])
-                f.create_dataset('label', data=r_band_data['label'][final_indices[r_band]])
-                f.create_dataset('zspec', data=r_band_data['zspec'][final_indices[r_band]])
-                # Store band information
-                f.create_dataset('band_names', data=np.array(band_names, dtype='S'))
+#             # write fused cutouts to new h5 file
+#             dt = h5py.special_dtype(vlen=str)
+#             with h5py.File(output_path, 'w', libver='latest') as f:
+#                 # Store the matched cutouts
+#                 f.create_dataset('images', data=final_cutouts.astype(np.float32))
+#                 # Store r-band ra and dec
+#                 f.create_dataset('ra', data=all_band_data[r_band]['ra'][final_indices[r_band]])
+#                 f.create_dataset('dec', data=all_band_data[r_band]['dec'][final_indices[r_band]])
+#                 f.create_dataset('tile', data=r_band_data['tile'], dtype=np.int32)
+#                 f.create_dataset(
+#                     'known_id', data=r_band_data['known_id'][final_indices[r_band]], dtype=dt
+#                 )
+#                 f.create_dataset('mto_id', data=r_band_data['mto_id'][final_indices[r_band]])
+#                 f.create_dataset('label', data=r_band_data['label'][final_indices[r_band]])
+#                 f.create_dataset('zspec', data=r_band_data['zspec'][final_indices[r_band]])
+#                 # Store band information
+#                 f.create_dataset('band_names', data=np.array(band_names, dtype='S'))
 
-            logger.debug(f'Created matched cutouts file: {output_path}')
+#             logger.debug(f'Created matched cutouts file: {output_path}')
 
-            if download_file:
-                name, ext = os.path.splitext(output_file)
-                dir_destination = os.path.join(parent_dir_destination, tile_dir)
-                os.makedirs(dir_destination, exist_ok=True)
-                temp_path = os.path.join(dir_destination, name + '_temp' + ext)
-                final_path = os.path.join(dir_destination, output_file)
+#             if download_file:
+#                 name, ext = os.path.splitext(output_file)
+#                 dir_destination = os.path.join(parent_dir_destination, tile_dir)
+#                 os.makedirs(dir_destination, exist_ok=True)
+#                 temp_path = os.path.join(dir_destination, name + '_temp' + ext)
+#                 final_path = os.path.join(dir_destination, output_file)
 
-                logger.info(f'Downloading {output_file}...')
+#                 if os.path.exists(final_path):
+#                     logger.info(
+#                         f'File {output_file} was already downloaded. Skipping to next tile.'
+#                     )
+#                     continue
 
-                result = subprocess.run(
-                    f'vcp -v {output_path} {temp_path}',
-                    shell=True,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
+#                 logger.info(f'Downloading {output_file}...')
 
-                result.check_returncode()
+#                 result = subprocess.run(
+#                     f'vcp -v {output_path} {temp_path}',
+#                     shell=True,
+#                     stderr=subprocess.PIPE,
+#                     text=True,
+#                 )
 
-                os.rename(temp_path, final_path)
+#                 result.check_returncode()
 
-                logger.info(f'Successfully downloaded {output_file} to {dir_destination}.')
+#                 os.rename(temp_path, final_path)
 
-        except Exception as e:
-            logger.error(f'Error processing tile {tile}: {e}')
+#                 logger.info(f'Successfully downloaded {output_file} to {dir_destination}.')
+
+#         except Exception as e:
+#             logger.error(f'Error processing tile {tile}: {e}')

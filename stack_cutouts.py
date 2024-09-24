@@ -2,12 +2,17 @@ import argparse
 import logging
 import multiprocessing
 import os  # noqa: E402
+import subprocess
 import time
 import warnings  # noqa: E402
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import timedelta
 
+import h5py
 import numpy as np
+from astropy import units as u
 from astropy.coordinates import SkyCoord
+from tqdm import tqdm
 
 from logging_setup import setup_logger
 
@@ -23,12 +28,13 @@ import psutil  # noqa: E402
 from vos import Client  # noqa: E402
 
 from kd_tree import build_tree  # noqa: E402
-from postprocess import fuse_cutouts  # noqa: E402
-from tile_cutter import tile_finder  # noqa: E402
+from postprocess import match_coordinates  # noqa: E402
+from tile_cutter import read_h5, tile_finder  # noqa: E402
 from utils import (  # noqa: E402
     TileAvailability,
     extract_tile_numbers,
     load_available_tiles,
+    transform_path,
     update_available_tiles,
 )
 
@@ -124,7 +130,8 @@ band_dict_incl = {key: band_dictionary.get(key) for key in considered_bands}
 
 # list of bands for which detections should be matched and cutouts combined
 fuse_bands = ['whigs-g', 'cfis_lsb-r', 'ps-i']
-
+# download fused cutouts?
+download_cutouts = True
 # retrieve from the VOSpace and update the currently available tiles; takes some time to run
 update_tiles = False
 # build kd tree with updated tiles otherwise use the already saved tree
@@ -201,6 +208,9 @@ os.makedirs(figure_directory, exist_ok=True)
 # define where the logs should be saved
 log_directory = os.path.join(main_directory, 'logs/')
 os.makedirs(log_directory, exist_ok=True)
+# define directory where cutouts should be saved locally
+local_download_directory = '/home/nick/astro/DwarForge/data'
+# local_download_directory = '/media/nick/Passport/UNIONS'
 
 
 def query_availability(update, in_dict, at_least_key, show_stats, build_kdtree, tile_info_dir):
@@ -398,6 +408,171 @@ def input_to_tile_list(
     return unique_tiles, tiles_x_bands, catalog
 
 
+def process_tile(tile, parent_dir, in_dict, band_names, parent_dir_destination, download_file):
+    try:
+        all_band_data = {}
+        r_band_data = {}
+
+        tile_dir = f'{str(tile[0]).zfill(3)}_{str(tile[1]).zfill(3)}'
+        # set outpath
+        output_file = f'{tile_dir}_matched_cutouts.h5'
+        out_dir = os.path.join(parent_dir, tile_dir, 'gri')
+        os.makedirs(out_dir, exist_ok=True)
+        output_path = os.path.join(out_dir, output_file)
+
+        # skip if it already exists
+        if not os.path.isfile(output_path):
+            # Read data for all bands
+            for band in band_names:
+                zfill = in_dict[band]['zfill']
+                file_prefix = in_dict[band]['name']
+                delimiter = in_dict[band]['delimiter']
+                suffix = in_dict[band]['suffix']
+                num1, num2 = str(tile[0]).zfill(zfill), str(tile[1]).zfill(zfill)
+                cutout_file = f'{file_prefix}{delimiter}{num1}{delimiter}{num2}{suffix}_cutouts.h5'
+                cutout_path = os.path.join(parent_dir, tile_dir, band, cutout_file)
+                cutout_dict = read_h5(cutout_path)
+
+                if band == 'cfis_lsb-r':
+                    r_band_data = cutout_dict.copy()
+                all_band_data[band] = {
+                    'cutouts': cutout_dict['images'],
+                    'ra': cutout_dict['ra'],
+                    'dec': cutout_dict['dec'],
+                }
+
+            # Use r-band as reference
+            r_band = 'cfis_lsb-r'
+            r_band_coords = SkyCoord(
+                all_band_data[r_band]['ra'], all_band_data[r_band]['dec'], unit=u.deg
+            )
+
+            # Match cutouts for each non-r band to r-band
+            matched_indices = {r_band: np.arange(len(all_band_data[r_band]['ra']))}
+            for band in band_names:
+                if band != r_band:
+                    target_coords = SkyCoord(
+                        all_band_data[band]['ra'], all_band_data[band]['dec'], unit=u.deg
+                    )
+                    matched_r_indices, matched_target_indices = match_coordinates(
+                        r_band_coords, target_coords
+                    )
+                    matched_indices[band] = (matched_r_indices, matched_target_indices)
+
+            # Find common matches across all bands
+            common_r_indices = matched_indices[r_band]
+            for band in band_names:
+                if band != r_band:
+                    common_r_indices = np.intersect1d(common_r_indices, matched_indices[band][0])
+
+            # Update matched indices for all bands based on common matches
+            final_indices = {r_band: common_r_indices}
+            for band in band_names:
+                if band != r_band:
+                    mask = np.isin(matched_indices[band][0], common_r_indices)
+                    final_indices[band] = matched_indices[band][1][mask]
+
+            num_matched = len(common_r_indices)
+            logger.info(f'Tile {tile}: number of matched cutouts: {num_matched}')
+
+            # Create the final array with shape (num_cutouts, num_bands, cutout_size, cutout_size)
+            cutout_size = all_band_data[r_band]['cutouts'].shape[1:]
+            final_cutouts = np.zeros((num_matched, len(band_names), *cutout_size), dtype=np.float32)
+
+            # Populate the final_cutouts array
+            for i, band in enumerate(band_names):
+                final_cutouts[:, i] = all_band_data[band]['cutouts'][final_indices[band]]
+
+            # write fused cutouts to new h5 file
+            dt = h5py.special_dtype(vlen=str)
+            with h5py.File(output_path, 'w', libver='latest') as f:
+                # Store the matched cutouts
+                f.create_dataset('images', data=final_cutouts.astype(np.float32))
+                # Store r-band ra and dec
+                f.create_dataset('ra', data=all_band_data[r_band]['ra'][final_indices[r_band]])
+                f.create_dataset('dec', data=all_band_data[r_band]['dec'][final_indices[r_band]])
+                f.create_dataset('tile', data=r_band_data['tile'], dtype=np.int32)
+                f.create_dataset(
+                    'known_id', data=r_band_data['known_id'][final_indices[r_band]], dtype=dt
+                )
+                f.create_dataset('mto_id', data=r_band_data['mto_id'][final_indices[r_band]])
+                f.create_dataset('label', data=r_band_data['label'][final_indices[r_band]])
+                f.create_dataset('zspec', data=r_band_data['zspec'][final_indices[r_band]])
+                # Store band information
+                f.create_dataset('band_names', data=np.array(band_names, dtype='S'))
+
+            logger.debug(f'Created matched cutouts file: {output_path}')
+
+        if download_file:
+            name, ext = os.path.splitext(output_file)
+            # dir_destination = os.path.join(parent_dir_destination, tile_dir)
+            # os.makedirs(dir_destination, exist_ok=True)
+            temp_path = os.path.join(parent_dir_destination, name + '_temp' + ext)
+            final_path = os.path.join(parent_dir_destination, output_file)
+
+            if os.path.exists(final_path):
+                logger.info(f'File {output_file} was already downloaded. Skipping to next tile.')
+                return
+
+            logger.info(f'Downloading {output_file}...')
+
+            output_path = transform_path(output_path)
+            result = subprocess.run(
+                f'vcp -v {output_path} {temp_path}',
+                shell=True,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            result.check_returncode()
+
+            os.rename(temp_path, final_path)
+
+            logger.info(f'Successfully downloaded {output_file} to {parent_dir_destination}.')
+        else:
+            return
+
+    except Exception as e:
+        logger.error(f'Error processing tile {tile}: {e}', exc_info=True)
+        raise  # Re-raise the exception to be caught by the parallel executor
+
+
+def fuse_cutouts_parallel(
+    parent_dir,
+    tiles,
+    in_dict,
+    band_names=['whigs-g', 'cfis_lsb-r', 'ps-i'],
+    parent_dir_destination=None,
+    download_file=False,
+    num_processes=None,
+):
+    logger.info(f'Starting to fuse cutouts for {len(tiles)} tiles in the bands: {band_names}')
+
+    # Create a ProcessPoolExecutor
+    with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        # Submit all tasks and create a dictionary to track futures
+        future_to_tile = {
+            executor.submit(
+                process_tile,
+                tile,
+                parent_dir,
+                in_dict,
+                band_names,
+                parent_dir_destination,
+                download_file,
+            ): tile
+            for tile in tiles
+        }
+
+        # Process completed futures with a progress bar
+        for future in tqdm(as_completed(future_to_tile), total=len(tiles)):
+            tile = future_to_tile[future]
+            try:
+                future.result()  # This will raise an exception if the task failed
+            except Exception as e:
+                logger.error(f'Error processing tile {tile}: {e}')
+
+
 def main(
     update,
     band_dict,
@@ -417,6 +592,9 @@ def main(
     id_key,
     id_key_default,
     bands_to_combine,
+    local_download_dir,
+    dl_cutouts,
+    num_processes,
 ):
     try:
         # query availability of the tiles
@@ -452,7 +630,15 @@ def main(
             f'There are {len(tiles_to_process)} bands that are available in {bands_to_combine}'
         )
 
-        fuse_cutouts(download_dir, tiles_to_process, band_dict, band_names=bands_to_combine)
+        fuse_cutouts_parallel(
+            download_dir,
+            tiles_to_process,
+            band_dict,
+            band_names=bands_to_combine,
+            parent_dir_destination=local_download_dir,
+            download_file=dl_cutouts,
+            num_processes=num_processes,
+        )
 
     except Exception as e:
         logger.error(f'An error occurred in the main process: {str(e)}')
@@ -513,6 +699,9 @@ if __name__ == '__main__':
         'band_constr': band_constraint,
         'download_dir': download_directory,
         'bands_to_combine': fuse_bands,
+        'local_download_dir': local_download_directory,
+        'dl_cutouts': download_cutouts,
+        'num_processes': args.processing_cores,
     }
 
     start = time.time()

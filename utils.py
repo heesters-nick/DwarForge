@@ -656,3 +656,16 @@ def is_mostly_zeros(file_path, fits_ext):
         return True
     else:
         return False
+
+
+def transform_path(path):
+    # Remove the leading slash if it exists
+    if path.startswith('/'):
+        path = path[1:]
+
+    # Replace the first slash with a colon
+    parts = path.split('/', 1)
+    if len(parts) > 1:
+        return f'/{parts[0]}:{parts[1]}'
+    else:
+        return path  # Return the original path if there's no slash to replace
