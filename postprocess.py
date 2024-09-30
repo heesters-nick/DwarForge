@@ -368,7 +368,7 @@ def add_labels(
     return det_df_updated, matching_stats
 
 
-def cutout2d_segmented(data, tile_str, segmap, object_id, x, y, size, cutout_in):
+def cutout2d_segmented(data, tile_str, segmap, object_id, x, y, size, cutout_in, seg_mode):
     """
     Create 2d cutout from an image, applying a segmentation mask for a specific object.
 
@@ -381,10 +381,14 @@ def cutout2d_segmented(data, tile_str, segmap, object_id, x, y, size, cutout_in)
         y (int): y-coordinate of cutout center
         size (int): square cutout size
         cutout_in (numpy.ndarray): empty input cutout
+        seg_mode (str): how to treat the segmentation map? multiply / concatenate
 
     Returns:
         numpy.ndarray: 2d cutout (size x size pixels) with only the specified object
     """
+    data_ones = np.ones_like(data, dtype=np.float32)
+    cutout_seg = cutout_in.copy()
+
     y_large, x_large = data.shape
     size_half = size // 2
     y_start = max(0, y - size_half)
@@ -402,12 +406,16 @@ def cutout2d_segmented(data, tile_str, segmap, object_id, x, y, size, cutout_in)
     data_slice = slice(y_start, y_end), slice(x_start, x_end)
 
     # Apply data and segmentation mask
-    cutout_in[cutout_slice] = data[data_slice] * (segmap[data_slice] == object_id)
+    if seg_mode == 'multiply':
+        cutout_in[cutout_slice] = data[data_slice] * (segmap[data_slice] == object_id)
+    elif seg_mode == 'concatenate':
+        cutout_in[cutout_slice] = data[data_slice]
+        cutout_seg[cutout_slice] = data_ones[data_slice] * (segmap[data_slice] == object_id)
 
-    return cutout_in
+    return cutout_in, cutout_seg
 
 
-def create_segmented_cutouts(data, tile_str, segmap, object_ids, xs, ys, cutout_size):
+def create_segmented_cutouts(data, tile_str, segmap, object_ids, xs, ys, cutout_size, seg_mode):
     """
     Create cutouts for multiple objects efficiently.
 
@@ -424,17 +432,18 @@ def create_segmented_cutouts(data, tile_str, segmap, object_ids, xs, ys, cutout_
         numpy.ndarray: array of cutouts
     """
     cutouts = np.zeros((len(object_ids), cutout_size, cutout_size), dtype=data.dtype)
+    cutouts_seg = np.zeros((len(object_ids), cutout_size, cutout_size), dtype=data.dtype)
     cutout_empty = np.zeros((cutout_size, cutout_size), dtype=data.dtype)
 
     for i, (obj_id, x, y) in enumerate(zip(object_ids, xs, ys)):
-        cutouts[i] = cutout2d_segmented(
-            data, tile_str, segmap, obj_id, x, y, cutout_size, cutout_empty.copy()
+        cutouts[i], cutouts_seg[i] = cutout2d_segmented(
+            data, tile_str, segmap, obj_id, x, y, cutout_size, cutout_empty.copy(), seg_mode
         )
 
-    return cutouts
+    return cutouts, cutouts_seg
 
 
-def make_cutouts(data, tile_str, df, segmap, cutout_size=64):
+def make_cutouts(data, tile_str, df, segmap, cutout_size=64, seg_mode='multiply'):
     """
     Makes cutouts from the objects passed in the dataframe, data is multiplied
     with the corresponding detection segment.
@@ -454,15 +463,23 @@ def make_cutouts(data, tile_str, df, segmap, cutout_size=64):
     object_ids = df['ID'].values  # Assuming the index is the object ID
 
     cutout_start = time.time()
-    cutouts = create_segmented_cutouts(data, tile_str, segmap, object_ids, xs, ys, cutout_size)
+    cutouts, cutouts_seg = create_segmented_cutouts(
+        data, tile_str, segmap, object_ids, xs, ys, cutout_size, seg_mode
+    )
     logger.debug(f'{tile_str}: cutouts done in {time.time()-cutout_start:.2f} seconds.')
 
-    return cutouts
+    return cutouts, cutouts_seg
 
 
 def load_segmap(file_path):
     path, extension = os.path.splitext(file_path)
-    seg_path = f'{path}_seg{extension}'
+    directory = os.path.dirname(file_path)
+    try:
+        seg_file = [f for f in os.listdir(directory) if f.endswith('_seg.fits')][0]
+        seg_path = os.path.join(directory, seg_file)
+    except Exception as e:
+        print(f'Error finding segmentation map: {e}')
+        mto_seg = None
     mto_seg, header_seg = open_fits(seg_path, fits_ext=0)
 
     return mto_seg
@@ -470,9 +487,11 @@ def load_segmap(file_path):
 
 def save_to_h5(
     stacked_cutout,
+    stacked_cutout_seg,
     object_df,
     tile_numbers,
     save_path,
+    seg_mode,
 ):
     """
     Save cutout data including metadata to file.
@@ -499,6 +518,8 @@ def save_to_h5(
         hf.create_dataset('dec', data=object_df['dec'].values.astype(np.float32))
         hf.create_dataset('label', data=object_df['lsb'].values.astype(np.float32))
         hf.create_dataset('zspec', data=object_df['zspec'].astype(np.float32))
+        if seg_mode == 'concatenate':
+            hf.create_dataset('segmaps', data=stacked_cutout_seg.astype(np.float32))
 
 
 def add_redshifts(det_df, z_class_cat):

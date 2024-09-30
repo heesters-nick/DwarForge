@@ -53,9 +53,9 @@ def get_unprocessed_jobs(
         tiles_to_process = tile_availability.unique_tiles
 
     if only_known_dwarfs:
-        tiles_with_dwarfs = get_dwarf_tile_list(dwarf_df)
+        tiles_with_dwarfs = get_dwarf_tile_list(dwarf_df, bands=list(process_band))
         tiles_to_process = [tile for tile in tiles_to_process if tile in tiles_with_dwarfs]
-        print(f'Tiles with dwarfs in r: {len(tiles_to_process)}')
+        logger.info(f'Tiles with dwarfs in {process_band}: {len(tiles_to_process)}')
     # test_tiles = [
     #     (np.int64(0), np.int64(227)),
     #     (np.int64(0), np.int64(228)),

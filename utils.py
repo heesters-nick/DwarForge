@@ -492,12 +492,37 @@ def check_objects_in_neighboring_tiles(tile, dwarfs_df, header):
     return dwarfs_in_current_tile
 
 
-def get_dwarf_tile_list(dwarf_cat):
-    tiles = dwarf_cat['tile'].values
-    non_nan_tiles = [x for x in tiles if x is not np.nan]
-    str_to_tuple = [ast.literal_eval(item) for item in non_nan_tiles]
+def get_dwarf_tile_list(dwarf_cat, in_dict, bands=None):
+    bands = [in_dict[band]['band'] for band in bands]
+    dwarf_cat_filtered = get_df_for_bands(dwarf_cat, bands)
+    dwarf_tiles_for_bands = dwarf_cat_filtered['tile'].values
+    str_to_tuple = [ast.literal_eval(item) for item in dwarf_tiles_for_bands]
     unique_tiles = set(str_to_tuple)
     return unique_tiles
+
+
+def check_bands(bands_str, to_check):
+    if isinstance(bands_str, str):
+        if bands_str.startswith('['):
+            # Handle string representation of a list
+            try:
+                bands_list = ast.literal_eval(bands_str)
+                return all(band in bands_list for band in to_check)
+            except Exception:
+                return False
+        else:
+            # Handle simple string format
+            return all(band in bands_str for band in to_check)
+    return False  # Return False for NaN values
+
+
+def get_df_for_bands(dwarf_cat, check_for_bands):
+    dwarf_cat_df = pd.read_csv(dwarf_cat)
+    df_select = dwarf_cat_df.loc[
+        (~dwarf_cat_df['tile'].isna())
+        & (dwarf_cat_df['bands'].apply(lambda x: check_bands(x, check_for_bands)))
+    ].reset_index(drop=True)
+    return df_select
 
 
 def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):

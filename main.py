@@ -16,7 +16,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='dwarforge_i',
+    name='dwarforge',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -158,17 +158,19 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'ps-i'
+anchor_band = 'cfis_lsb-r'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
-process_only_known_dwarfs = False
+process_only_known_dwarfs = True
 # define the square cutout size in pixels
 cutout_size = 64
 # minimum surface brightness to select objects
 mu_limit = 22.0
 # minimum effective radius to select objects
 re_limit = 1.6
+# how to treat the segmentation mask
+segmentation_mode = 'concatenate'
 
 
 # retrieve from the VOSpace and update the currently available tiles; takes some time to run
@@ -523,6 +525,7 @@ def process_tile_for_band(
     re_lim,
     mu_lim,
     z_class_cat,
+    seg_mode,
 ):
     while (
         not (all_downloads_complete.is_set() and process_queue.empty())
@@ -622,20 +625,23 @@ def process_tile_for_band(
                 # make cutouts
                 if cut_objects:
                     segmap = load_segmap(prepped_path)
-                    cutouts = make_cutouts(
+                    cutouts, cutouts_seg = make_cutouts(
                         binned_data,
                         tile_str=tile_str(tile),
                         df=mto_det,
                         segmap=segmap,
                         cutout_size=cut_size,
+                        seg_mode=seg_mode,
                     )
                     path, _ = os.path.splitext(final_path)
-                    cutout_path = f'{path}_cutouts.h5'
+                    cutout_path = f'{path}_cutouts_single.h5'
                     save_to_h5(
                         stacked_cutout=cutouts,
+                        stacked_cutout_seg=cutouts_seg,
                         object_df=mto_det,
                         tile_numbers=tile,
                         save_path=cutout_path,
+                        seg_mode=seg_mode,
                     )
 
                 # delete raw data
@@ -718,6 +724,7 @@ def main(
     re_lim,
     mu_lim,
     z_class_cat,
+    seg_mode,
 ):
     # Initialize the database for progress tracking
     init_db(database)
@@ -869,6 +876,7 @@ def main(
                     re_lim,
                     mu_lim,
                     z_class_cat,
+                    seg_mode,
                 ),
             )
             p.start()
@@ -1072,6 +1080,7 @@ if __name__ == '__main__':
         're_lim': re_limit,
         'mu_lim': mu_limit,
         'z_class_cat': redshift_class_catalog,
+        'seg_mode': segmentation_mode,
     }
 
     start = time.time()
