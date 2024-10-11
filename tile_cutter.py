@@ -10,7 +10,7 @@ from astropy.wcs.utils import skycoord_to_pixel
 
 from kd_tree import TileWCS, query_tree, relate_coord_tile
 from logging_setup import get_logger
-from utils import tile_str
+from utils import decompress_fits, tile_str
 
 logger = get_logger()
 
@@ -131,6 +131,9 @@ def download_tile_one_band(tile_numbers, tile_fitsname, final_path, temp_path, v
         logger.info(
             f'Successfully downloaded tile {tile_str(tile_numbers)} for band {band} in {np.round(time.time()-start_time, 1)} seconds.'
         )
+        # HSC data is compressed, decompress for faster read speed
+        if band in ['whigs-g', 'wishes-z']:
+            decompress_fits(final_path)
         return True
 
     except subprocess.CalledProcessError as e:

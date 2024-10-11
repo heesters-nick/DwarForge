@@ -16,6 +16,7 @@ from astropy.io import fits
 from astropy.stats import SigmaClip
 from astropy.wcs import WCS
 from astroquery.gaia import Gaia
+from numpy import linalg as LA
 from photutils.background import Background2D
 from scipy.spatial import cKDTree
 from scipy.stats import truncnorm
@@ -60,13 +61,15 @@ def func_PCA(x, y):
     return axis_ratio, minor_axis, pca
 
 
-def query_gaia_stars(target_coord, r_arcsec):
+def query_gaia_stars(target_coord, r_arcsec, max_retries=3, retry_delay=5):
     """
     Query Gaia DR3 for non-galaxy sources within the defined search radius.
 
     Args:
         target_coord (numpy.2darray): coordinates of the tile center.
         r_arcsec (float): search radius in arcseconds.
+        max_retries (int): maximum number of retires after a failed attempt.
+        retry_delay (int): seconds of delay between retries.
 
     Returns:
         table (dataframe): non-galaxy Gaia sources within the search radius.
@@ -74,22 +77,33 @@ def query_gaia_stars(target_coord, r_arcsec):
     Gaia.MAIN_GAIA_TABLE = 'gaiadr3.gaia_source'  # type: ignore # Select Data Release 3
     Gaia.ROW_LIMIT = -1  # unlimited rows
     columns = ['source_id', 'ra', 'dec', 'phot_g_mean_mag', 'in_galaxy_candidates']
-    # Query Gaia DR3 for sources within the defined search radius
-    job = Gaia.cone_search_async(
-        target_coord, radius=u.Quantity(r_arcsec, u.arcsec), columns=columns
-    )
-    table = job.get_results()
-    # Check if the results come back empty, if so return an empty dataframe
-    if table is None:
-        return pd.DataFrame()
-    else:
-        table = table.to_pandas()
-    # Remove sources that are galaxy candidates
-    table = table.loc[~table['in_galaxy_candidates']].reset_index(drop=True)
-    table.rename(columns={'phot_g_mean_mag': 'Gmag'}, inplace=True)
-    # Remove sources with Gmag >= 20.6
-    table = table.loc[table['Gmag'] < 20.6].reset_index(drop=True)
-    return table
+
+    for attempt in range(max_retries):
+        try:
+            # Query Gaia DR3 for sources within the defined search radius
+            job = Gaia.cone_search_async(
+                target_coord, radius=u.Quantity(r_arcsec, u.arcsec), columns=columns
+            )
+            table = job.get_results()
+
+            # Check if the results come back empty, if so return an empty dataframe
+            if table is None:
+                return pd.DataFrame()
+            else:
+                table = table.to_pandas()
+            # Remove sources that are galaxy candidates
+            table = table.loc[~table['in_galaxy_candidates']].reset_index(drop=True)
+            table.rename(columns={'phot_g_mean_mag': 'Gmag'}, inplace=True)
+            # Remove sources with Gmag >= 20.6
+            table = table.loc[table['Gmag'] < 20.6].reset_index(drop=True)
+            return table
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.error(f'Error occurred: {str(e)}. Retrying in {retry_delay} seconds...')
+                time.sleep(retry_delay)
+            else:
+                logger.error(f'Max retries reached. Last error: {str(e)}')
+                return pd.DataFrame()
 
 
 def remove_background(image):
@@ -493,10 +507,16 @@ def check_objects_in_neighboring_tiles(tile, dwarfs_df, header):
 
 
 def get_dwarf_tile_list(dwarf_cat, in_dict, bands=None):
-    bands = [in_dict[band]['band'] for band in bands]
-    dwarf_cat_filtered = get_df_for_bands(dwarf_cat, bands)
-    dwarf_tiles_for_bands = dwarf_cat_filtered['tile'].values
-    str_to_tuple = [ast.literal_eval(item) for item in dwarf_tiles_for_bands]
+    try:
+        bands = [in_dict[band]['band'] for band in bands]
+        dwarf_cat_filtered = get_df_for_bands(dwarf_cat, bands)
+        dwarf_tiles_for_bands = dwarf_cat_filtered['tile'].values
+    except Exception as e:
+        print(f'Error getting known dwarf tiles in r: {e}')
+    try:
+        str_to_tuple = [ast.literal_eval(item) for item in dwarf_tiles_for_bands]
+    except Exception as e:
+        print(f'Error in str_to_tuple: {e}')
     unique_tiles = set(str_to_tuple)
     return unique_tiles
 
@@ -517,7 +537,10 @@ def check_bands(bands_str, to_check):
 
 
 def get_df_for_bands(dwarf_cat, check_for_bands):
-    dwarf_cat_df = pd.read_csv(dwarf_cat)
+    if isinstance(dwarf_cat, str):
+        dwarf_cat_df = pd.read_csv(dwarf_cat)
+    else:
+        dwarf_cat_df = dwarf_cat
     df_select = dwarf_cat_df.loc[
         (~dwarf_cat_df['tile'].isna())
         & (dwarf_cat_df['bands'].apply(lambda x: check_bands(x, check_for_bands)))
@@ -694,3 +717,54 @@ def transform_path(path):
         return f'/{parts[0]}:{parts[1]}'
     else:
         return path  # Return the original path if there's no slash to replace
+
+
+def dist_peak_center(obj):
+    x, y = round(obj['xpeak'].iloc[0]), round(obj['ypeak'].iloc[0])
+    xmin, xmax = round(obj['xmin'].iloc[0]), round(obj['xmax'].iloc[0])
+    ymin, ymax = round(obj['ymin'].iloc[0]), round(obj['ymax'].iloc[0])
+    x_center, y_center = np.mean([xmin, xmax]), np.mean([ymin, ymax])
+    npix = obj['npix'].iloc[0]
+    # Get euclidean distance between the photometric center and the center of the segment
+    d_peak_center = LA.norm(np.array([x_center, y_center]) - np.array([x, y]))
+    # normalized by area
+    d_norm = d_peak_center / npix
+
+    return d_peak_center, d_norm
+
+
+def estimate_axis_ratio(labeled_array, label):
+    y, x = np.nonzero(labeled_array == label)
+    if len(y) < 2:  # Handle single-pixel objects
+        return 1.0
+    y = y.astype(np.float32)
+    x = x.astype(np.float32)
+    y -= y.mean()
+    x -= x.mean()
+    inertia = np.array([[np.sum(y**2), np.sum(x * y)], [np.sum(x * y), np.sum(x**2)]])
+    eigenvalues = np.linalg.eigvals(inertia)
+    minor, major = np.sqrt(np.abs(eigenvalues))
+    return minor / major if major != 0 else 1.0
+
+
+def ensure_list(variable):
+    if isinstance(variable, str):
+        return [variable]
+    elif isinstance(variable, list):
+        return variable
+    else:
+        raise TypeError('Input should be either a string or a list.')
+
+
+def decompress_fits(file_path, fits_ext=1):
+    """
+    Decompress fits file by reading and saving again.
+
+    Args:
+        file_path (str): path to file
+        fits_ext (int, optional): data extension. Defaults to 1.
+    """
+    data, header = open_fits(file_path, fits_ext=fits_ext)
+    new_hdu = fits.PrimaryHDU(data=data.astype(np.float32), header=header)
+    # save new fits file
+    new_hdu.writeto(file_path, overwrite=True)

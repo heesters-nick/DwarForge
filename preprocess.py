@@ -13,12 +13,15 @@ from astropy.stats import SigmaClip, gaussian_fwhm_to_sigma, sigma_clipped_stats
 from astropy.wcs import WCS
 from photutils.background import Background2D, MedianBackground
 from PIL import Image, ImageDraw
+from scipy import ndimage
 from scipy.ndimage import binary_dilation, label
 
-from detect import detect_anomaly, source_detection
+from detect import detect_anomaly, source_detection_with_dynamic_limit
 from logging_setup import get_logger
 from utils import (
     delete_file,
+    dist_peak_center,
+    estimate_axis_ratio,
     func_PCA,
     generate_positive_trunc_normal,
     open_fits,
@@ -28,8 +31,6 @@ from utils import (
     query_gaia_stars,
     tile_str,
 )
-
-sep.set_extract_pixstack(200000)
 
 logger = get_logger()
 
@@ -77,20 +78,27 @@ def replace_with_local_background(
     bkg_median,
     bkg_std,
     object_df,
-    embedded_threshold=0.9,
+    grid_size,
+    band,
 ):
     h, w = data.shape
     result = data.copy()
     total_stars = len(star_df)
     skipped_stars = 0
+    undetected_stars = 0
 
     bright_star_mask = bright_star_mask.astype(np.uint8)
     replaced_stars_mask = np.zeros_like(bright_star_mask, dtype=np.uint8)
-
     visualization_mask = np.zeros((h, w, 3), dtype=np.uint8)
+    border_visualization = np.zeros((h, w), dtype=np.uint8)
+
+    star_case_rows = []
+
+    grid_y, grid_x = np.indices((h, w))
+    grid_i, grid_j = grid_y // grid_size, grid_x // grid_size
 
     def create_annular_segments(
-        shape, center, inner_r, outer_r, spike_len, spike_thick, n_segments=4
+        shape, center, inner_r, outer_r, spike_len, spike_thick, n_segments=4, star_case='isolated'
     ):
         y, x = center
         mask = np.zeros(shape, dtype=np.uint8)
@@ -102,8 +110,15 @@ def replace_with_local_background(
         angles = np.arctan2(yy - y, xx - x)
         # Shift angles to be in [0, 2π) range
         angles = (angles + 2 * np.pi) % (2 * np.pi)
-        # set annulus extend
-        annulus_extend = max(round(outer_r / 2) + 2, spike_len + 1)
+        if star_case == 'not_deblended':
+            annulus_extend = max(round(inner_r * 1.5), round(inner_r + 2))
+        else:
+            # set annulus extend
+            annulus_extend = max(
+                round(outer_r / 2) + 2,
+                round(inner_r * 1.5),
+                round(spike_len / 2) + round(0.3 * spike_len / 2),
+            )
         # define annulus mask
         annulus = (distances >= inner_r + 1) & (distances <= annulus_extend)
 
@@ -134,22 +149,49 @@ def replace_with_local_background(
 
         return mask
 
-    for _, star in star_df.iterrows():
-        y, x = min(round(star.y), h - 1), min(round(star.x), w - 1)
-        r = max(round(star.R_ISO * r_scale), 1)
-        spike_len = round(star.diffs_len_fit * l_scale)
-        spike_thick = max(1, round(star.diffs_thick_fit))
-
-        outer_r = max(r + 7, spike_len + 2)  # Ensure we capture enough background
-
-        y_min, y_max = max(0, y - outer_r), min(h, y + outer_r + 1)
-        x_min, x_max = max(0, x - outer_r), min(w, x + outer_r + 1)
-        local_region = result[y_min:y_max, x_min:x_max]
-        local_y, local_x = y - y_min, x - x_min
-
-        # Create star region mask including diffraction spikes
+    def process_bright_star(
+        local_region,
+        local_y,
+        local_x,
+        y,
+        x,
+        r,
+        spike_len,
+        spike_thick,
+        outer_r,
+        local_segmap,
+        star_segment,
+        local_object_df,
+    ):
         star_region = np.zeros_like(local_region, dtype=np.uint8)
         cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)
+
+        # Create a mask of non-star objects
+        non_star_mask = np.zeros_like(local_segmap, dtype=bool)
+        for segment_id in np.unique(local_segmap):
+            if segment_id != 0 and segment_id != star_segment:
+                obj = local_object_df[local_object_df['ID'] == segment_id]
+                if (
+                    not obj.empty and obj['star'].iloc[0] == 0 and obj['star_cand'].iloc[0] == 0
+                ):  # Non-star object
+                    non_star_mask |= local_segmap == segment_id
+
+        # Remove non-star objects from the star region
+        star_region[non_star_mask] = 0
+
+        bg_segments = create_annular_segments(
+            local_region.shape,
+            (local_y, local_x),
+            r,
+            outer_r,
+            spike_len,
+            spike_thick,
+        )
+
+        # Remove non-star objects and other star objects from background segments
+        bg_segments[local_segmap != 0] = 0
+
+        # Diffraction spikes are masked in any case if present
         if spike_len > 0:
             cv2.drawMarker(
                 star_region,
@@ -160,104 +202,553 @@ def replace_with_local_background(
                 thickness=spike_thick,
             )
 
-        # Check if star is embedded
-        check_annulus = cv2.circle(
-            np.zeros_like(local_region, dtype=np.uint8), (local_x, local_y), r + 2, 255, 1
-        )
-        check_pixels = local_region[check_annulus > 0]
-        median_background = bkg.background_median
-        rms_background = bkg.background_rms_median
-        is_embedded = (
-            np.sum(check_pixels > max(1, bkg_factor * rms_background + median_background))
-            / len(check_pixels)
-            >= embedded_threshold
+        return star_region, bg_segments
+
+    def process_embedded(
+        local_region,
+        local_y,
+        local_x,
+        y,
+        x,
+        r,
+        spike_len,
+        spike_thick,
+        outer_r,
+        local_segmap,
+        star_segment,
+        r_sep,
+    ):
+        star_region = local_segmap == star_segment
+
+        bg_segments = create_annular_segments(
+            local_region.shape,
+            (local_y, local_x),
+            r_sep,
+            max(round(r_sep * 1.5), r_sep + 3),
+            0,
+            spike_thick,
         )
 
-        if is_embedded:
-            r_reduced = max(round(r * 0.5), 1)
-            l_reduced = spike_len
-            star_region_reduced = np.zeros_like(local_region, dtype=np.uint8)
-            cv2.circle(
-                star_region_reduced, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA
+        # Remove the star region from bg_segments
+        bg_segments[star_region] = 0
+
+        return star_region, bg_segments
+
+    def process_not_deblended(
+        local_region,
+        local_y,
+        local_x,
+        y,
+        x,
+        r,
+        spike_len,
+        spike_thick,
+        outer_r,
+        local_segmap,
+        star_segment,
+    ):
+        r_reduced = max(round(r * 0.3), 1)
+        l_reduced = max(round(spike_len * 0.4), 1)
+
+        #         print(f'x: {x}, y: {y}, r_reduced: {r_reduced}, l_reduced: {l_reduced}')
+
+        star_region_reduced = np.zeros_like(local_region, dtype=np.uint8)
+        cv2.circle(
+            star_region_reduced, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA
+        )
+        if spike_len > 0:
+            cv2.drawMarker(
+                star_region_reduced,
+                (local_x, local_y),
+                color=255,
+                markerType=cv2.MARKER_CROSS,
+                markerSize=l_reduced,
+                thickness=spike_thick,
             )
-            if spike_len > 0:
-                l_reduced = max(round(spike_len * 0.4), 1)
-                cv2.drawMarker(
-                    star_region_reduced,
-                    (local_x, local_y),
-                    color=255,
-                    markerType=cv2.MARKER_CROSS,
-                    markerSize=l_reduced,
-                    thickness=spike_thick,
-                )
 
-            # Create a narrow annulus around the reduced star region for background estimation
+        inner_r_bg = r_reduced
+        outer_r_bg = r_reduced + 3
+        bg_segments = create_annular_segments(
+            local_region.shape,
+            (local_y, local_x),
+            inner_r_bg,
+            outer_r_bg,
+            l_reduced,
+            spike_thick,
+            star_case='not_deblended',
+        )
+
+        return star_region_reduced, bg_segments
+
+    def process_other_bands(
+        local_region,
+        local_y,
+        local_x,
+        y,
+        x,
+        r,
+        r_sep,
+        outer_r,
+        local_segmap,
+        star_segment,
+        local_object_df,
+        is_bright_star,
+        star_case,
+    ):
+        if is_bright_star:
+            star_region = np.zeros_like(local_region, dtype=np.uint8)
+            cv2.circle(
+                star_region, (local_x, local_y), round(r_sep * 2.5), 255, -1, lineType=cv2.LINE_AA
+            )
+            star_region = binary_dilation(star_region, iterations=1).astype(np.uint8)
+
+            # Remove non-star objects from the star region
+            non_star_mask = np.zeros_like(local_segmap, dtype=bool)
+            for segment_id in np.unique(local_segmap):
+                if segment_id != 0 and segment_id != star_segment:
+                    obj = local_object_df[local_object_df['ID'] == segment_id]
+                    if (
+                        not obj.empty and obj['star'].iloc[0] == 0 and obj['star_cand'].iloc[0] == 0
+                    ):  # Non-star object
+                        non_star_mask |= local_segmap == segment_id
+
+            star_region[non_star_mask] = 0
+
+        else:
+            star_region = (local_segmap == star_segment).astype(np.uint8)
+
+        if star_case in ['embedded']:
+            bg_segments = create_annular_segments(
+                local_region.shape,
+                (local_y, local_x),
+                round(r_sep),
+                max(round(r_sep * 1.5), r_sep + 3),
+                0,  # No spike_len for other bands
+                1,  # Minimal spike_thick
+            )
+            bg_segments[star_region] = 0
+        elif is_bright_star and star_case in ['not_deblended']:
+            r_reduced = max(round(r * 0.3), 1)
+            star_region = np.zeros_like(local_region, dtype=np.uint8)
+            cv2.circle(star_region, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA)
+
             inner_r_bg = r_reduced
-            outer_r_bg = l_reduced  # Up to reduced length of diffraction spikes
+            outer_r_bg = r_reduced + 3
             bg_segments = create_annular_segments(
                 local_region.shape,
                 (local_y, local_x),
                 inner_r_bg,
                 outer_r_bg,
-                l_reduced,
+                0,
                 spike_thick,
+                star_case='not_deblended',
             )
-        else:
-            star_region_reduced = star_region
-            # Use the original background estimation for non-embedded stars
+            bg_segments[star_region > 0] = 0
+        elif is_bright_star and (star_case not in ['embedded', 'not_deblended']):
             bg_segments = create_annular_segments(
-                local_region.shape, (local_y, local_x), r, outer_r, spike_len, spike_thick
+                local_region.shape,
+                (local_y, local_x),
+                round(2.5 * r_sep),
+                round(4 * r_sep),
+                0,  # No spike_len for other bands
+                1,  # Minimal spike_thick
+            )
+            bg_segments[star_region] = 0
+        elif not is_bright_star and star_case in ['not_deblended']:
+            star_region = np.zeros_like(local_region, dtype=np.uint8)
+            cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)
+
+            inner_r_bg = r
+            outer_r_bg = r + 3
+            bg_segments = create_annular_segments(
+                local_region.shape,
+                (local_y, local_x),
+                inner_r_bg,
+                outer_r_bg,
+                0,
+                1,
+                star_case='not_deblended',
+            )
+            bg_segments[star_region > 0] = 0
+        else:
+            bg_segments = None
+
+        return star_region, bg_segments
+
+    def check_star_overlap(star_region, local_bright_star_mask, overlap_threshold=0.8):
+        # Calculate the total area of the star
+        star_area = np.sum(star_region > 0)
+
+        # Calculate the overlapping area
+        overlap_area = np.sum((star_region > 0) & (local_bright_star_mask > 0))
+
+        # Calculate the overlap fraction
+        overlap_fraction = overlap_area / star_area if star_area > 0 else 0
+
+        # Check if the overlap fraction exceeds the threshold
+        if overlap_fraction >= overlap_threshold:
+            return True
+        else:
+            return False
+
+    for _, star in star_df.iterrows():
+        y, x = min(round(star.y), h - 1), min(round(star.x), w - 1)
+        star_segment = segmap[y, x]
+        r = max(round(star.R_ISO * r_scale), 1)
+        spike_len = round(star.diffs_len_fit * l_scale) if band == 'cfis_lsb-r' else 0
+        spike_thick = max(1, round(star.diffs_thick_fit)) if band == 'cfis_lsb-r' else 1
+
+        star_case, star_border_mask, r_sep = determine_star_case(segmap, x, y, r, object_df)
+        star_case_rows.append({'x': x, 'y': y, 'star_case': star_case})
+        border_visualization |= star_border_mask
+
+        if star_case == 'undetected':
+            undetected_stars += 1
+            continue
+
+        outer_r = max(round(r * 1.5), r + 7, round(spike_len / 2) + 2)
+        y_min, y_max = max(0, y - outer_r), min(h, y + outer_r + 1)
+        x_min, x_max = max(0, x - outer_r), min(w, x + outer_r + 1)
+        local_y, local_x = y - y_min, x - x_min
+        local_region = result[y_min:y_max, x_min:x_max]
+        local_segmap = segmap[y_min:y_max, x_min:x_max]
+        local_bright_star_mask = bright_star_mask[y_min:y_max, x_min:x_max]
+        local_object_df = object_df[object_df['ID'].isin(np.unique(local_segmap))]
+
+        is_bright_star = star.Gmag < 15.0
+
+        if band == 'cfis_lsb-r':
+            if is_bright_star and star_case not in ['embedded', 'not_deblended']:
+                star_region, bg_segments = process_bright_star(
+                    local_region,
+                    local_y,
+                    local_x,
+                    y,
+                    x,
+                    r,
+                    spike_len,
+                    spike_thick,
+                    outer_r,
+                    local_segmap,
+                    star_segment,
+                    local_object_df,
+                )
+            elif star_case in ['adjacent', 'isolated']:
+                star_region = (local_segmap == star_segment).astype(np.uint8)
+                star_region = binary_dilation(star_region, iterations=1).astype(np.uint8)
+                if spike_len > 0:
+                    cv2.drawMarker(
+                        star_region,
+                        (local_x, local_y),
+                        color=255,
+                        markerType=cv2.MARKER_CROSS,
+                        markerSize=spike_len,
+                        thickness=spike_thick,
+                    )
+                bg_segments = np.zeros_like(star_region)
+            elif star_case == 'embedded':
+                star_region, bg_segments = process_embedded(
+                    local_region,
+                    local_y,
+                    local_x,
+                    y,
+                    x,
+                    r,
+                    spike_len,
+                    spike_thick,
+                    outer_r,
+                    local_segmap,
+                    star_segment,
+                    r_sep,
+                )
+            elif star_case == 'not_deblended':
+                star_region, bg_segments = process_not_deblended(
+                    local_region,
+                    local_y,
+                    local_x,
+                    y,
+                    x,
+                    r,
+                    spike_len,
+                    spike_thick,
+                    outer_r,
+                    local_segmap,
+                    star_segment,
+                )
+        else:
+            star_region, bg_segments = process_other_bands(
+                local_region,
+                local_y,
+                local_x,
+                y,
+                x,
+                r,
+                r_sep,
+                outer_r,
+                local_segmap,
+                star_segment,
+                local_object_df,
+                is_bright_star,
+                star_case,
             )
 
-        # Exclude all stars (bright and dim) from the background segments
-        local_bright_star_mask = bright_star_mask[y_min:y_max, x_min:x_max]
-        local_segmap = segmap[y_min:y_max, x_min:x_max]
+        if check_star_overlap(star_region, local_bright_star_mask, overlap_threshold=0.99):
+            skipped_stars += 1
+            continue
 
         # Exclude bright stars and other segments from background estimation
-        try:
+        if bg_segments is not None and star_case not in ['embedded', 'not_deblended']:
             bg_segments[local_bright_star_mask > 0] = 0
-            star_segment = segmap[y, x]
             bg_segments[(local_segmap > 0) & (local_segmap != star_segment)] = 0
-        except Exception as e:
-            print(f'Error in excluding segements: {e}\nx: {x}, y: {y}')
 
-        visualization_mask[y_min:y_max, x_min:x_max, 0] |= (
-            star_region_reduced  # Red for star region
-        )
-        visualization_mask[y_min:y_max, x_min:x_max, 1] |= (
-            bg_segments  # Green for background segments
-        )
+        if bg_segments is not None and (
+            is_bright_star or star_case in ['embedded', 'not_deblended']
+        ):
+            bg_data = local_region[bg_segments > 0]
 
-        if np.any((star_region_reduced > 0) & (local_bright_star_mask > 0)):
-            skipped_stars += 1
-            continue
+            if len(bg_data) == 0 or np.count_nonzero(np.isnan(bg_data)) / len(bg_data) > 0.9:
+                skipped_stars += 1
+                continue
 
-        bg_data = local_region[bg_segments > 0]
+            mean, median, std = sigma_clipped_stats(bg_data, sigma=3.0)
+            num_pixels = np.sum(star_region > 0)
+            if star_case in ['embedded', 'not_deblended']:
+                random_values = generate_positive_trunc_normal(bg_data, median, std, num_pixels)
+            else:
+                random_values = np.random.normal(median, min(std, 3), num_pixels)
 
-        if len(bg_data) == 0 or np.count_nonzero(np.isnan(bg_data)) / len(bg_data) > 0.9:
-            skipped_stars += 1
-            continue
+            local_region[star_region > 0] = random_values
+        else:  # Use background grid for other cases in non-cfis_lsb-r bands
+            local_grid_i = grid_i[y_min:y_max, x_min:x_max]
+            local_grid_j = grid_j[y_min:y_max, x_min:x_max]
 
-        mean, median, std = sigma_clipped_stats(bg_data, sigma=3.0)
-
-        num_pixels = np.sum(star_region_reduced > 0)
-        if is_embedded:
-            # For embedded stars, use a more conservative approach
-            random_values = generate_positive_trunc_normal(
-                bg_data, median, min(std, 3.0), num_pixels
+            medians = bkg_median[local_grid_i[star_region > 0], local_grid_j[star_region > 0]]
+            stds = np.minimum(
+                bkg_std[local_grid_i[star_region > 0], local_grid_j[star_region > 0]], 3.0
             )
-        else:
-            random_values = np.random.normal(median, min(std, 3.0), num_pixels)
 
-        local_result = local_region.copy()
-        local_result[star_region_reduced > 0] = random_values
+            replacement_values = np.random.normal(medians, stds)
+            local_region[star_region > 0] = replacement_values
 
-        result[y_min:y_max, x_min:x_max] = local_result
+        visualization_mask[y_min:y_max, x_min:x_max, 0] |= star_region.astype(
+            np.uint8
+        )  # Red for star region
+        if bg_segments is not None:
+            visualization_mask[y_min:y_max, x_min:x_max, 1] |= bg_segments.astype(
+                np.uint8
+            )  # Green for background segments
 
-        replaced_stars_mask[y_min:y_max, x_min:x_max] |= star_region_reduced
+        replaced_stars_mask[y_min:y_max, x_min:x_max] |= star_region.astype(np.uint8)
+        result[y_min:y_max, x_min:x_max] = local_region
 
     logger.debug(f'Skipped {skipped_stars}/{total_stars} stars.')
-    return result, replaced_stars_mask.astype(bool), visualization_mask
+    logger.debug(f'Undetected {undetected_stars}/{total_stars} stars.')
+    star_case_df = pd.DataFrame(star_case_rows)
+    return (
+        result,
+        replaced_stars_mask.astype(bool),
+        visualization_mask,
+        star_case_df,
+        border_visualization,
+    )
+
+
+# def replace_with_local_background(
+#     data,
+#     star_df,
+#     bright_star_mask,
+#     r_scale,
+#     l_scale,
+#     bkg,
+#     bkg_factor,
+#     segmap,
+#     bkg_mean,
+#     bkg_median,
+#     bkg_std,
+#     object_df,
+#     embedded_threshold=0.9,
+# ):
+#     h, w = data.shape
+#     result = data.copy()
+#     total_stars = len(star_df)
+#     skipped_stars = 0
+
+#     bright_star_mask = bright_star_mask.astype(np.uint8)
+#     replaced_stars_mask = np.zeros_like(bright_star_mask, dtype=np.uint8)
+
+#     visualization_mask = np.zeros((h, w, 3), dtype=np.uint8)
+
+#     def create_annular_segments(
+#         shape, center, inner_r, outer_r, spike_len, spike_thick, n_segments=4
+#     ):
+#         y, x = center
+#         mask = np.zeros(shape, dtype=np.uint8)
+
+#         yy, xx = np.ogrid[: shape[0], : shape[1]]
+#         distances = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
+
+#         # Use arctan2 for full 360-degree angle range
+#         angles = np.arctan2(yy - y, xx - x)
+#         # Shift angles to be in [0, 2π) range
+#         angles = (angles + 2 * np.pi) % (2 * np.pi)
+#         # set annulus extend
+#         annulus_extend = max(round(outer_r / 2) + 2, round(spike_len / 2) + 2)
+#         # define annulus mask
+#         annulus = (distances >= inner_r + 1) & (distances <= annulus_extend)
+
+#         segment_size = 2 * np.pi / n_segments
+#         for i in range(n_segments):
+#             start_angle = i * segment_size
+#             end_angle = (i + 1) * segment_size
+
+#             # Handle the case where the segment crosses the 0/2π boundary
+#             if start_angle < end_angle:
+#                 segment = (angles >= start_angle) & (angles < end_angle)
+#             else:
+#                 segment = (angles >= start_angle) | (angles < end_angle)
+
+#             mask[(annulus & segment)] = 255
+
+#         # Remove diffraction spike areas
+#         spike_mask = np.zeros(shape, dtype=np.uint8)
+#         cv2.drawMarker(
+#             spike_mask,
+#             (x, y),
+#             color=255,
+#             markerType=cv2.MARKER_CROSS,
+#             markerSize=spike_len,
+#             thickness=spike_thick,
+#         )
+#         mask[spike_mask > 0] = 0
+
+#         return mask
+
+#     for _, star in star_df.iterrows():
+#         y, x = min(round(star.y), h - 1), min(round(star.x), w - 1)
+#         r = max(round(star.R_ISO * r_scale), 1)
+#         spike_len = round(star.diffs_len_fit * l_scale)
+#         spike_thick = max(1, round(star.diffs_thick_fit))
+
+#         outer_r = max(
+#             max(round(r + r * 0.3), r + 7), round(spike_len / 2) + 2
+#         )  # Ensure we capture enough background
+
+#         y_min, y_max = max(0, y - outer_r), min(h, y + outer_r + 1)
+#         x_min, x_max = max(0, x - outer_r), min(w, x + outer_r + 1)
+#         local_region = result[y_min:y_max, x_min:x_max]
+#         local_y, local_x = y - y_min, x - x_min
+
+#         # Create star region mask including diffraction spikes
+#         star_region = np.zeros_like(local_region, dtype=np.uint8)
+#         cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)
+#         if spike_len > 0:
+#             cv2.drawMarker(
+#                 star_region,
+#                 (local_x, local_y),
+#                 color=255,
+#                 markerType=cv2.MARKER_CROSS,
+#                 markerSize=spike_len,
+#                 thickness=spike_thick,
+#             )
+
+#         # Check if star is embedded
+#         check_annulus = cv2.circle(
+#             np.zeros_like(local_region, dtype=np.uint8), (local_x, local_y), r + 2, 255, 1
+#         )
+#         check_pixels = local_region[check_annulus > 0]
+#         median_background = bkg.background_median
+#         rms_background = bkg.background_rms_median
+#         is_embedded = (
+#             np.sum(check_pixels > max(1, bkg_factor * rms_background + median_background))
+#             / len(check_pixels)
+#             >= embedded_threshold
+#         )
+
+#         if is_embedded:
+#             r_reduced = max(round(r * 0.5), 1)
+#             l_reduced = spike_len
+#             star_region_reduced = np.zeros_like(local_region, dtype=np.uint8)
+#             cv2.circle(
+#                 star_region_reduced, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA
+#             )
+#             if spike_len > 0:
+#                 l_reduced = max(round(spike_len * 0.4), 1)
+#                 cv2.drawMarker(
+#                     star_region_reduced,
+#                     (local_x, local_y),
+#                     color=255,
+#                     markerType=cv2.MARKER_CROSS,
+#                     markerSize=l_reduced,
+#                     thickness=spike_thick,
+#                 )
+
+#             # Create a narrow annulus around the reduced star region for background estimation
+#             inner_r_bg = r_reduced
+#             outer_r_bg = l_reduced  # Up to reduced length of diffraction spikes
+#             bg_segments = create_annular_segments(
+#                 local_region.shape,
+#                 (local_y, local_x),
+#                 inner_r_bg,
+#                 outer_r_bg,
+#                 l_reduced,
+#                 spike_thick,
+#             )
+#         else:
+#             star_region_reduced = star_region
+#             # Use the original background estimation for non-embedded stars
+#             bg_segments = create_annular_segments(
+#                 local_region.shape, (local_y, local_x), r, outer_r, spike_len, spike_thick
+#             )
+
+#         # Exclude all stars (bright and dim) from the background segments
+#         local_bright_star_mask = bright_star_mask[y_min:y_max, x_min:x_max]
+#         local_segmap = segmap[y_min:y_max, x_min:x_max]
+
+#         # Exclude bright stars and other segments from background estimation
+#         try:
+#             bg_segments[local_bright_star_mask > 0] = 0
+#             star_segment = segmap[y, x]
+#             bg_segments[(local_segmap > 0) & (local_segmap != star_segment)] = 0
+#         except Exception as e:
+#             print(f'Error in excluding segements: {e}\nx: {x}, y: {y}')
+
+#         visualization_mask[y_min:y_max, x_min:x_max, 0] |= (
+#             star_region_reduced  # Red for star region
+#         )
+#         visualization_mask[y_min:y_max, x_min:x_max, 1] |= (
+#             bg_segments  # Green for background segments
+#         )
+
+#         if np.any((star_region_reduced > 0) & (local_bright_star_mask > 0)):
+#             skipped_stars += 1
+#             continue
+
+#         bg_data = local_region[bg_segments > 0]
+
+#         if len(bg_data) == 0 or np.count_nonzero(np.isnan(bg_data)) / len(bg_data) > 0.9:
+#             skipped_stars += 1
+#             continue
+
+#         mean, median, std = sigma_clipped_stats(bg_data, sigma=3.0)
+
+#         num_pixels = np.sum(star_region_reduced > 0)
+#         if is_embedded:
+#             # For embedded stars, use a more conservative approach
+#             random_values = generate_positive_trunc_normal(
+#                 bg_data, median, min(std, 3.0), num_pixels
+#             )
+#         else:
+#             random_values = np.random.normal(median, min(std, 3.0), num_pixels)
+
+#         local_result = local_region.copy()
+#         local_result[star_region_reduced > 0] = random_values
+
+#         result[y_min:y_max, x_min:x_max] = local_result
+
+#         replaced_stars_mask[y_min:y_max, x_min:x_max] |= star_region_reduced
+
+#     logger.debug(f'Skipped {skipped_stars}/{total_stars} stars.')
+#     return result, replaced_stars_mask.astype(bool), visualization_mask
 
 
 # def replace_with_local_background_old(
@@ -506,6 +997,8 @@ def mask_stars(
     gmag_lim=13.2,
     save_to_file=False,
     survey='UNIONS',
+    grid_size=25,
+    band='cfis_lsb-r',
 ):
     full_star_df = star_fit(star_df)
 
@@ -527,12 +1020,14 @@ def mask_stars(
 
     h, w = data.shape
     bright_star_mask = np.zeros((h, w), dtype=np.uint8)
+    visualization_mask = np.zeros((h, w), dtype=np.uint8)
+    replaced_star_mask = np.zeros((h, w), dtype=np.uint8)
 
     # Create mask for bright stars (not to be replaced)
     for _, star in bright_star_df.iterrows():
         x, y = round(star.x), round(star.y)
         r = max(round(star.R_ISO * r_scale), 1)
-        cv2.circle(bright_star_mask, (x, y), r, 255, -1, lineType=cv2.LINE_AA)
+        cv2.circle(bright_star_mask, (x, y), round(0.6 * r), 255, -1, lineType=cv2.LINE_AA)
         # Add diffraction spikes for bright stars
         spike_len = round(star.diffs_len_fit * l_scale)
         spike_thick = round(star.diffs_thick_fit * 5.0)
@@ -542,23 +1037,27 @@ def mask_stars(
             (x, y),
             color=255,
             markerType=cv2.MARKER_CROSS,
-            markerSize=spike_len,
-            thickness=spike_thick,
+            markerSize=round(0.8 * spike_len),
+            thickness=round(0.9 * spike_thick),
         )
 
-    data, replaced_star_mask, visualization_mask = replace_with_local_background(
-        data,
-        dim_star_df,
-        bright_star_mask,
-        r_scale,
-        l_scale,
-        bkg,
-        bkg_factor,
-        segmap,
-        bkg_mean,
-        bkg_median,
-        bkg_std,
-        object_df,
+    data, replaced_star_mask, visualization_mask, star_case_df, vis_mask_border = (
+        replace_with_local_background(
+            data,
+            dim_star_df,
+            bright_star_mask,
+            r_scale,
+            l_scale,
+            bkg,
+            bkg_factor,
+            segmap,
+            bkg_mean,
+            bkg_median,
+            bkg_std,
+            object_df,
+            grid_size,
+            band,
+        )
     )
 
     if save_to_file:
@@ -570,7 +1069,16 @@ def mask_stars(
         # save new fits file
         new_hdu.writeto(out_path, overwrite=True)
 
-    return data, replaced_star_mask, out_path, bright_star_flag, gmag_brightest, visualization_mask
+    return (
+        data,
+        replaced_star_mask,
+        out_path,
+        bright_star_flag,
+        gmag_brightest,
+        visualization_mask,
+        star_case_df,
+        vis_mask_border,
+    )
 
 
 def streak_mask(data_masked, file_path, bkg_rms, table_dir, header, psf_multiplier=2.0):
@@ -778,13 +1286,13 @@ def bin_image_cv2(image, bin_size):
     )
 
 
-def mask_hot_pixels(image, threshold, bkg, max_size=3, sigma=5):
+def mask_hot_pixels(image, threshold, bkg, max_size=3, sigma=5, neighbor_ratio=0.2):
     # Create a mask of pixels above the threshold
     hot_pixels = image > threshold
     neighbor_threshold = bkg.background_median + sigma * bkg.background_rms_median
 
     # Label connected regions
-    labeled, num_features = label(hot_pixels)
+    labeled, num_features = ndimage.label(hot_pixels)
 
     # Get the size of each labeled region
     sizes = np.bincount(labeled.ravel())
@@ -800,22 +1308,33 @@ def mask_hot_pixels(image, threshold, bkg, max_size=3, sigma=5):
     structure = np.ones((3, 3), dtype=bool)
 
     # Dilate the potential hot pixels
-    dilated = binary_dilation(potential_hot_pixels, structure=structure)
+    dilated = ndimage.binary_dilation(potential_hot_pixels, structure=structure)
 
     # The outline is the difference between the dilated image and the original
     outline = dilated & ~potential_hot_pixels
 
-    not_hot = np.zeros_like(image, dtype=bool)
-    not_hot[outline] = image[outline] <= neighbor_threshold
+    # Count the number of surrounding pixels below the threshold
+    below_threshold = np.zeros_like(image, dtype=int)
+    below_threshold[outline] = (image[outline] <= neighbor_threshold).astype(int)
 
-    # Identify hot pixels
+    # Sum the counts for each potential hot pixel
+    below_threshold_sum = ndimage.sum(
+        below_threshold, labels=labeled, index=np.arange(1, num_features + 1)
+    )
+
+    # Calculate the total number of surrounding pixels for each region
+    surrounding_pixels_count = ndimage.sum(
+        outline, labels=labeled, index=np.arange(1, num_features + 1)
+    )
+
+    # Calculate the ratio of surrounding pixels below threshold
+    below_threshold_ratio = below_threshold_sum / surrounding_pixels_count
+
+    # Create a mask for hot pixels based on the ratio
     hot_pixel_mask = np.zeros_like(image, dtype=bool)
-
-    # Dilate the not_hot mask to touch the potential hot pixels
-    touching_not_hot = binary_dilation(not_hot, structure=structure)
-
-    # Hot pixels are those that are potential hot pixels and touch a not_hot pixel
-    hot_pixel_mask = potential_hot_pixels & touching_not_hot
+    hot_pixel_mask[potential_hot_pixels] = (
+        below_threshold_ratio[labeled[potential_hot_pixels] - 1] >= neighbor_ratio
+    )
 
     # Create a copy of the image and mask the hot pixels
     masked_image = image.copy()
@@ -824,7 +1343,7 @@ def mask_hot_pixels(image, threshold, bkg, max_size=3, sigma=5):
     return masked_image, hot_pixel_mask
 
 
-def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
+def prep_tile(tile, file_path, fits_ext, zp, band, bin_size=4):
     """
     Preprocess a tile for detection with MTO. This includes masking stars and streaks, and smoothing the image.
 
@@ -839,9 +1358,6 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
     prep_start = time.time()
     # read in data and header
     data, header = open_fits(file_path, fits_ext)
-    # adjust zeropoint
-    if zp != 30.0:
-        data = adjust_flux_with_zp(data, current_zp=zp, standard_zp=30.0)
     # bin image to increase signal-to-noise + aid LSB detection
     binned_image = bin_image_cv2(data, bin_size)
     # save binned image to fits
@@ -851,7 +1367,12 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
     start = time.time()
     # detect data anomalies and set them to zero
     data_ano_mask, file_path_ano_mask = detect_anomaly(
-        data_binned, header_binned, file_path_binned, replace_anomaly=True, save_to_file=True
+        data_binned,
+        header_binned,
+        file_path_binned,
+        replace_anomaly=True,
+        dilate_mask=True,
+        save_to_file=True,
     )
     logger.debug(f'{tile_str(tile)}: detected anomalies in {time.time()-start:.2f} seconds.')
     # estimate the background
@@ -867,30 +1388,70 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
     logger.debug(f'{tile_str(tile)}: estimated background in {time.time()-start:.2f} seconds.')
     # mask hot pixels
     start = time.time()
-    data_ano_mask, _ = mask_hot_pixels(data_ano_mask, threshold=70, bkg=bkg, max_size=3, sigma=5)
+    data_ano_mask, _ = mask_hot_pixels(
+        data_ano_mask, threshold=70, bkg=bkg, max_size=3, sigma=3, neighbor_ratio=0.2
+    )
     logger.debug(f'{tile_str(tile)}: masked hot pixels in {time.time()-start:.2f} seconds.')
     # find stars in the image from gaia
     star_df = find_stars(tile_str(tile), header_binned)
-    # detect tiny objects
+    # sort df to mask dim stars first, overlapping bright stars will mask over them, leaving a smoother image
+    sorted_star_df = star_df.sort_values(by='Gmag', ascending=False)
+    # detect objects using SEP
     try:
-        objects_sep, data_sub_sep, bkg_sep, segmap_sep = source_detection(
+        objects_sep, data_sub_sep, bkg_sep, segmap_sep = source_detection_with_dynamic_limit(
             data_ano_mask,
             header_binned,
             file_path,
-            star_df,
+            sorted_star_df,
             thresh=1.0,
             minarea=4,
             deblend_nthresh=32,
-            deblend_cont=0.001,
+            deblend_cont=0.0005,
             save_segmap=False,
+            extended_flag_radius=9.0,
+            mag_limit=14.0,
+            initial_limit=500000,
+            max_limit=10000000,
+            increment_factor=2,
         )
-        # get photometry of tiny objects
+
+        if objects_sep is None:
+            raise Exception('source_detection failed after multiple attempts')
+
+        # get photometry of detected objects
         pixel_scale = abs(header_binned['CD1_1'] * 3600)
         objects_sep = aperture_photometry_mag_auto(
-            data_sub_sep, objects_sep, zp=30, pixel_scale=pixel_scale
+            data_sub_sep, objects_sep, zp=zp, pixel_scale=pixel_scale
         )
+
+        # correct oversubtracted background for g-band
+        bkg_mean, bkg_median, bkg_std = None, None, None
+        if band == 'whigs-g':
+            start_dilate = time.time()
+            (
+                data_ano_mask,
+                bg_mean,
+                bg_median,
+                bg_std,
+                ring_mask,
+                dilated_mask,
+                large_objects_mask,
+            ) = correct_oversubtracted_background(
+                data_ano_mask,
+                file_path,
+                header,
+                segmap_sep,
+                grid_size=25,
+                dilation_size=65,
+                min_pixels=600,
+                min_axis_ratio=0.2,
+                save_file=False,
+            )
+            logger.debug(f'Dilation took: {time.time()-start_dilate:.2f} seconds.')
+
         start = time.time()
 
+        # mask tiny/small objects
         data_ano_mask, segmap_updated, objects_updated, bkg_mean, bkg_median, bkg_std = (
             mask_small_objects(
                 objects_sep,
@@ -898,7 +1459,10 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
                 data_ano_mask,
                 header_binned,
                 file_path,
-                max_npix=47,
+                bkg_mean,
+                bkg_median,
+                bkg_std,
+                max_npix=39,
                 max2_npix=100,
                 re_max=1.5,
                 grid_size=25,
@@ -926,22 +1490,26 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
         bright_star_flag,
         gmag_brightest,
         visualization_mask,
+        star_case_df,
+        visualization_mask_border,
     ) = mask_stars(
         tile_str(tile),
         data_ano_mask,
         header_binned,
         file_path_binned,
-        star_df,
+        sorted_star_df,
         bkg,
         bkg_mean,
         bkg_median,
         bkg_std,
         segmap_updated,
         objects_updated,
-        r_scale=0.55,
+        r_scale=0.9,
         l_scale=0.8,
-        gmag_lim=12.5,
+        gmag_lim=10.5,
         save_to_file=True,
+        grid_size=25,
+        band=band,
     )
     logger.debug(f'{tile_str(tile)}: masked stars in {time.time()-start:.2f} seconds.')
 
@@ -954,6 +1522,8 @@ def prep_tile(tile, file_path, fits_ext, zp, bin_size=4):
             bkg_dim = 50
         elif gmag_brightest <= 7:
             bkg_dim = 25
+        elif gmag_brightest <= 6:
+            bkg_dim = 10
         else:
             bkg_dim = 100
         data_sub, _, file_path_sub = remove_background(
@@ -1070,74 +1640,7 @@ def create_annular_segments(shape, center, inner_r, outer_r, n_segments=4):
     return mask
 
 
-def replace_small_objects_old(
-    data, header, file_path, objects_df, segmap, max_npix=30, annulus_width=3, save_to_file=False
-):
-    result = data.copy()
-    h, w = data.shape
-    replaced_mask = np.zeros((h, w), dtype=np.uint8)
-    visualization_mask = np.zeros((h, w, 3), dtype=np.uint8)
-    out_path = file_path
-
-    small_obj_df = objects_df[objects_df['npix'] < max_npix].reset_index(drop=True)
-    large_obj_df = objects_df[objects_df['npix'] >= max_npix]
-    skipped_obj = 0
-    total_obj = len(small_obj_df)
-
-    for _, obj in small_obj_df.iterrows():
-        x, y = round(obj['x']), round(obj['y'])
-        r = round(np.sqrt(obj['npix'] / np.pi))
-        obj_id = obj['ID']  # noqa: F841
-
-        # Check for overlap with larger objects
-        xmin, xmax = max(0, x - r), min(w, x + r + 1)
-        ymin, ymax = max(0, y - r), min(h, y + r + 1)
-        local_segmap = segmap[ymin:ymax, xmin:xmax]
-
-        # If the object overlaps with any larger object, skip it
-        if np.any(np.isin(local_segmap, large_obj_df['ID'].values)):
-            skipped_obj += 1
-            continue
-
-        outer_r = r + annulus_width
-
-        y_min, y_max = max(0, y - outer_r), min(h, y + outer_r + 1)
-        x_min, x_max = max(0, x - outer_r), min(w, x + outer_r + 1)
-        local_region = result[y_min:y_max, x_min:x_max]
-        local_y, local_x = y - y_min, x - x_min
-
-        obj_region = np.zeros_like(local_region, dtype=np.uint8)
-        cv2.circle(obj_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)
-
-        bg_segments = create_annular_segments(local_region.shape, (local_y, local_x), r, outer_r)
-
-        visualization_mask[y_min:y_max, x_min:x_max, 0] |= obj_region
-        visualization_mask[y_min:y_max, x_min:x_max, 1] |= bg_segments
-
-        bg_data = local_region[bg_segments > 0]
-
-        if len(bg_data) == 0 or np.count_nonzero(np.isnan(bg_data)) / len(bg_data) > 0.9:
-            skipped_obj += 1
-            continue
-
-        local_result = replace_object_pixels(local_region, obj_region, bg_data)
-
-        result[y_min:y_max, x_min:x_max] = local_result
-        replaced_mask[y_min:y_max, x_min:x_max] |= obj_region
-
-    if save_to_file:
-        directory, filename = os.path.split(file_path)
-        name, extension = os.path.splitext(filename)
-        new_filename = f'{name}_tiny_mask{extension}'
-        out_path = os.path.join(directory, new_filename)
-        new_hdu = fits.PrimaryHDU(data=result.astype(np.float32), header=header)
-        new_hdu.writeto(out_path, overwrite=True)
-
-    logger.debug(f'Skipped {skipped_obj}/{total_obj} objects.')
-    return result, out_path, replaced_mask.astype(bool), visualization_mask
-
-
-def create_background_map(data, segmap, grid_size=25):
+def create_background_map(data, segmap, grid_size=25, min_fraction=0.5):
     # Create a copy of the data with objects masked
     bg_only = np.where(segmap == 0, data, np.nan)
 
@@ -1151,53 +1654,34 @@ def create_background_map(data, segmap, grid_size=25):
 
     for i in range(grid_h):
         for j in range(grid_w):
-            y_start, y_end = i * grid_size, (i + 1) * grid_size
-            x_start, x_end = j * grid_size, (j + 1) * grid_size
+            y_start, y_end = i * grid_size, min((i + 1) * grid_size, h)
+            x_start, x_end = j * grid_size, min((j + 1) * grid_size, w)
 
             cell_data = bg_only[y_start:y_end, x_start:x_end]
 
             # Remove NaN values
             cell_data_clean = cell_data[~np.isnan(cell_data)]
 
-            if len(cell_data_clean) > 0:
+            # Check if we have enough background pixels
+            if len(cell_data_clean) / cell_data.size >= min_fraction:
                 # Use sigma_clipped_stats on non-NaN data
                 mean, median, std = sigma_clipped_stats(cell_data_clean, sigma=3.0)
                 bg_mean[i, j] = mean
                 bg_median[i, j] = median
                 bg_std[i, j] = std
 
-    # Fill in NaN cells with nearest neighbor values
-    for i in range(grid_h):
-        for j in range(grid_w):
-            if np.isnan(bg_mean[i, j]):
-                # Find the nearest non-NaN neighbor
-                distances = np.sqrt(
-                    (np.arange(grid_h)[:, np.newaxis] - i) ** 2
-                    + (np.arange(grid_w)[np.newaxis, :] - j) ** 2
-                )
-                valid_mask = ~np.isnan(bg_mean)
-                if np.any(valid_mask):
-                    nearest_idx = np.unravel_index(
-                        np.argmin(np.where(valid_mask, distances, np.inf)), distances.shape
-                    )
-                    bg_mean[i, j] = bg_mean[nearest_idx]
-                    bg_median[i, j] = bg_median[nearest_idx]
-                    bg_std[i, j] = bg_std[nearest_idx]
-                else:
-                    # If no valid neighbors exist, use global statistics
-                    global_data = bg_only[~np.isnan(bg_only)]
-                    if len(global_data) > 0:
-                        mean, median, std = sigma_clipped_stats(global_data, sigma=3.0)
-                        bg_mean[i, j] = mean
-                        bg_median[i, j] = median
-                        bg_std[i, j] = std
-                    else:
-                        # If no valid data at all, set to some default values
-                        bg_mean[i, j] = 0
-                        bg_median[i, j] = 0
-                        bg_std[i, j] = 1  # or some other appropriate default
+    # Fill invalid cells with nearest valid cell values
+    bg_mean = fill_invalid_cells_nearest(bg_mean)
+    bg_median = fill_invalid_cells_nearest(bg_median)
+    bg_std = fill_invalid_cells_nearest(bg_std)
 
     return bg_mean, bg_median, bg_std
+
+
+def fill_invalid_cells_nearest(array):
+    mask = np.isnan(array)
+    idx = ndimage.distance_transform_edt(mask, return_distances=False, return_indices=True)
+    return array[tuple(idx)]
 
 
 def mask_small_objects(
@@ -1206,17 +1690,21 @@ def mask_small_objects(
     image,
     header,
     file_path,
+    bkg_mean,
+    bkg_median,
+    bkg_std,
     max_npix,
     max2_npix,
     re_max,
     grid_size=25,
     save_file=False,
 ):
-    # Create background statistics map
-    bg_mean, bg_median, bg_std = create_background_map(image, segmap, grid_size)
+    if bkg_mean is None:
+        # Create background statistics map
+        bkg_mean, bkg_median, bkg_std = create_background_map(image, segmap, grid_size)
 
     # Create boolean masks for different object categories
-    very_small_objects_mask = objects_df['npix'] < max_npix
+    very_small_objects_mask = (objects_df['npix'] < max_npix) & (objects_df['star'] != 1)
     medium_objects_mask = (
         (objects_df['npix'] >= max_npix)
         & (objects_df['npix'] < max2_npix)
@@ -1254,8 +1742,8 @@ def mask_small_objects(
     grid_i, grid_j = grid_y // grid_size, grid_x // grid_size
 
     # Get medians and stds for the pixels to be masked
-    medians = bg_median[grid_i[objects_to_mask], grid_j[objects_to_mask]]
-    stds = np.minimum(bg_std[grid_i[objects_to_mask], grid_j[objects_to_mask]], 3.0)
+    medians = bkg_median[grid_i[objects_to_mask], grid_j[objects_to_mask]]
+    stds = np.minimum(bkg_std[grid_i[objects_to_mask], grid_j[objects_to_mask]], 3.0)
 
     # Generate replacement values
     replacement_values = np.random.normal(medians, stds)
@@ -1291,4 +1779,217 @@ def mask_small_objects(
         tiny_hdu = fits.PrimaryHDU(data=masked_image.astype(np.float32), header=header)
         tiny_hdu.writeto(out_path_tiny, overwrite=True)
 
-    return masked_image, masked_segmap, updated_objects_df, bg_mean, bg_median, bg_std
+    return masked_image, masked_segmap, updated_objects_df, bkg_mean, bkg_median, bkg_std
+
+
+def determine_star_case(
+    segmap, x, y, r, object_df, expansion=5, min_d_peak_center=15, max_mag=13.5
+):
+    h, w = segmap.shape
+
+    # Get the segment ID at the star's location
+    star_segment = segmap[y, x]
+
+    # Check if the star is in the background (segment ID is 0)
+    if star_segment == 0:
+        return 'undetected', np.zeros((h, w), dtype=np.uint8), None
+
+    # Try to get the bounding box information for this star from object_df
+    star_obj = object_df[object_df['ID'] == star_segment]
+    if star_obj.empty:
+        # If there's no entry in object_df, treat it as undetected
+        return 'undetected', np.zeros((h, w), dtype=np.uint8), 0
+
+    # Get bounding box information
+    xmin, xmax = round(star_obj['xmin'].iloc[0]), round(star_obj['xmax'].iloc[0])
+    ymin, ymax = round(star_obj['ymin'].iloc[0]), round(star_obj['ymax'].iloc[0])
+    # number of pixels assigned to this object
+    npix = star_obj['npix'].iloc[0]
+    # gmag if object is a star
+    gmag = star_obj['Gmag'].iloc[0]
+    # Get euclidean distance between the photometric center and the center of the segment
+    d_peak_center, d_norm = dist_peak_center(star_obj)
+    # Get object radius
+    r_sep = np.sqrt(npix / np.pi)
+
+    # If the radius of the matched object is significantly larger than the expected star radius from
+    # the magnitude fit, then the star is embedded in a bright object and was not deblended.
+    potentially_not_deblended = (r_sep > 1.0 * r) or (
+        d_peak_center >= min_d_peak_center and gmag > max_mag
+    )
+
+    # check if the expencted segment of the star to be classified is adjacent to or overlapping with
+    # other bright stars. If so, it should not be classified as not_deblended
+    border_segments_check = np.array([])
+    if potentially_not_deblended:
+        star_mask_check = np.zeros((h, w), dtype=np.uint8)
+        cv2.circle(star_mask_check, (x, y), r, 1, -1, lineType=cv2.LINE_AA)
+
+        # Dilate the star mask to get its outer edge
+        kernel_check = np.ones((3, 3), np.uint8)
+        dilated_mask_check = cv2.dilate(star_mask_check, kernel_check, iterations=1)
+
+        # The border is where the dilated mask is 1 and the original mask is 0
+        border_mask_check = cv2.subtract(dilated_mask_check, star_mask_check)
+
+        # Check the segment IDs in the border region
+        border_segments_check = np.unique(segmap[border_mask_check == 1])
+
+        # Check if any surrounding segment is a star
+        adjacent_to_star = False
+        for segment_id in border_segments_check:
+            if segment_id != 0 and segment_id != star_segment:
+                adj_obj = object_df[object_df['ID'] == segment_id]
+                if not adj_obj.empty and (
+                    (adj_obj['star'].iloc[0] == 1 and adj_obj['Gmag'].iloc[0] < max_mag)
+                    or (
+                        adj_obj['star_cand'].iloc[0] == 1
+                        and adj_obj['Gmag_closest'].iloc[0] < max_mag
+                    )
+                ):
+                    adjacent_to_star = True
+                    break
+
+    # Expand the bounding box
+    xmin_expanded = max(0, xmin - expansion)
+    xmax_expanded = min(w, xmax + expansion)
+    ymin_expanded = max(0, ymin - expansion)
+    ymax_expanded = min(h, ymax + expansion)
+
+    local_segmap = segmap[ymin_expanded:ymax_expanded, xmin_expanded:xmax_expanded]
+    star_mask = local_segmap == star_segment
+
+    # Dilate the star mask to get its outer edge
+    kernel = np.ones((3, 3), np.uint8)
+    dilated_mask = cv2.dilate(star_mask.astype(np.uint8), kernel, iterations=1)
+
+    # The border is where the dilated mask is 1 and the original mask is 0
+    border_mask = (dilated_mask == 1) & (star_mask == 0)
+
+    # Check the values surrounding the star segment
+    surrounding_values = local_segmap[border_mask]
+
+    # Create a visualization mask
+    vis_mask = np.zeros((h, w), dtype=np.uint8)
+    vis_mask[ymin_expanded:ymax_expanded, xmin_expanded:xmax_expanded][border_mask] = 255
+
+    # Determine the case
+    if np.all(surrounding_values == 0):
+        case = 'isolated'
+    elif potentially_not_deblended and not adjacent_to_star:  # and 0 not in border_segments_check:
+        case = 'not_deblended'
+        vis_mask = np.zeros((h, w), dtype=np.uint8)
+    elif potentially_not_deblended and adjacent_to_star:
+        case = 'adjacent'
+    elif np.any(surrounding_values == 0):
+        case = 'adjacent'
+    else:
+        case = 'embedded'
+
+    return case, vis_mask, round(r_sep)
+
+
+def create_ring_mask(
+    file_path, header, segmap, min_pixels=600, min_axis_ratio=0.2, dilation_size=5, save_file=False
+):
+    # Convert segmap to binary
+    binary_mask = (segmap > 0).astype(int)
+
+    # Label connected components
+    labeled_objects, num_features = ndimage.label(binary_mask)
+
+    # Count pixels in each labeled region
+    object_sizes = np.bincount(labeled_objects.ravel())[1:]
+
+    # Identify large objects
+    large_object_candidates = np.where(object_sizes >= min_pixels)[0] + 1
+
+    # Calculate axis ratios only for large object candidates
+    axis_ratios = np.array(
+        [estimate_axis_ratio(labeled_objects, label) for label in large_object_candidates]
+    )
+
+    # Filter large objects based on axis ratio
+    large_object_labels = large_object_candidates[axis_ratios >= min_axis_ratio]
+
+    # Create mask of large objects
+    large_objects_mask = np.isin(labeled_objects, large_object_labels)
+
+    # Dilate large objects
+    dilated_large_objects = ndimage.binary_dilation(large_objects_mask, iterations=dilation_size)
+
+    # Combine dilated large objects with original binary mask
+    final_mask = np.logical_or(dilated_large_objects, binary_mask).astype(int)
+
+    # Create ring mask
+    ring_mask = np.logical_and(final_mask, np.logical_not(binary_mask))
+
+    if save_file:
+        directory, filename = os.path.split(file_path)
+        name, extension = os.path.splitext(filename)
+        new_filename = f'{name}_seg_dilated{extension}'
+        out_path = os.path.join(directory, new_filename)
+        new_hdu = fits.PrimaryHDU(data=final_mask.astype(np.float32), header=header)
+        # save new fits file
+        new_hdu.writeto(out_path, overwrite=True)
+
+        new_filename = f'{name}_ring_mask{extension}'
+        out_path = os.path.join(directory, new_filename)
+        new_hdu = fits.PrimaryHDU(data=ring_mask.astype(np.float32), header=header)
+        # save new fits file
+        new_hdu.writeto(out_path, overwrite=True)
+
+        new_filename = f'{name}_large_mask{extension}'
+        out_path = os.path.join(directory, new_filename)
+        new_hdu = fits.PrimaryHDU(data=large_objects_mask.astype(np.float32), header=header)
+        # save new fits file
+        new_hdu.writeto(out_path, overwrite=True)
+
+    return final_mask, ring_mask, large_objects_mask
+
+
+def correct_oversubtracted_background(
+    image,
+    file_path,
+    header,
+    segmap,
+    grid_size=25,
+    dilation_size=5,
+    min_pixels=600,
+    min_axis_ratio=0.2,
+    save_file=False,
+):
+    # Create dilated mask, ring mask, and large objects mask
+    dilated_mask, ring_mask, large_objects_mask = create_ring_mask(
+        file_path, header, segmap, min_pixels, min_axis_ratio, dilation_size, save_file=save_file
+    )
+
+    # Create background map using the dilated mask
+    bg_mean, bg_median, bg_std = create_background_map(image, dilated_mask, grid_size)
+
+    # Create grid index arrays
+    h, w = image.shape
+    grid_y, grid_x = np.indices((h, w))
+    grid_i, grid_j = grid_y // grid_size, grid_x // grid_size
+
+    # Get medians and stds for the pixels in the ring
+    ring_medians = bg_median[grid_i[ring_mask], grid_j[ring_mask]]
+    ring_stds = bg_std[grid_i[ring_mask], grid_j[ring_mask]]
+
+    # Generate replacement values
+    replacement_values = np.random.normal(ring_medians, ring_stds)
+
+    # Create a copy of the image and replace values
+    corrected_image = image.copy()
+    corrected_image[ring_mask] = replacement_values
+
+    if save_file:
+        directory, filename = os.path.split(file_path)
+        name, extension = os.path.splitext(filename)
+        new_filename = f'{name}_oversub_corr{extension}'
+        out_path = os.path.join(directory, new_filename)
+        new_hdu = fits.PrimaryHDU(data=corrected_image.astype(np.float32), header=header)
+        # save new fits file
+        new_hdu.writeto(out_path, overwrite=True)
+
+    return corrected_image, bg_mean, bg_median, bg_std, ring_mask, dilated_mask, large_objects_mask

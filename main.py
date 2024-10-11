@@ -16,7 +16,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='dwarforge',
+    name='dwarforge_g_dwarf_v3',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -29,7 +29,7 @@ from vos import Client  # noqa: E402
 
 from detect import param_phot, run_mto  # noqa: E402
 from kd_tree import build_tree  # noqa: E402
-from postprocess import add_labels, load_segmap, make_cutouts, save_to_h5  # noqa: E402
+from postprocess import add_labels, make_cutouts, save_to_h5  # noqa: E402
 from preprocess import prep_tile  # noqa: E402
 from shutdown import GracefulKiller, shutdown_worker  # noqa: E402
 from tile_cutter import (  # noqa: E402
@@ -53,6 +53,7 @@ from utils import (  # noqa: E402
     extract_tile_numbers,
     is_mostly_zeros,
     load_available_tiles,
+    open_fits,
     tile_str,
     update_available_tiles,
 )
@@ -95,7 +96,7 @@ band_dictionary = {
         'vos': 'vos:cfis/whigs/stack_images_CFIS_scheme/',
         'suffix': '.fits',
         'delimiter': '_',
-        'fits_ext': 1,
+        'fits_ext': 0,
         'zfill': 0,
         'zp': 27.0,
     },
@@ -148,7 +149,7 @@ band_dict_incl = {key: band_dictionary.get(key) for key in considered_bands}
 
 ### pipeline options ###
 
-create_cutouts = True
+create_cutouts = False
 # plot cutouts?
 plot = False
 # Plot a random cutout from one of the tiles after execution else plot all cutouts
@@ -158,7 +159,7 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'cfis_lsb-r'
+anchor_band = 'whigs-g'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
@@ -571,11 +572,11 @@ def process_tile_for_band(
             else:
                 # Preprocess (bin)
                 binned_data, prepped_data, prepped_path, prepped_header = prep_tile(
-                    tile, final_path, fits_ext, zp, bin_size=4
+                    tile, final_path, fits_ext, zp, band, bin_size=4
                 )
 
                 # Run detection
-                param_path = run_mto(
+                param_path, seg_path = run_mto(
                     file_path=prepped_path,
                     band=band,
                     with_segmap=True,
@@ -624,7 +625,7 @@ def process_tile_for_band(
 
                 # make cutouts
                 if cut_objects:
-                    segmap = load_segmap(prepped_path)
+                    segmap, header_seg = open_fits(seg_path, fits_ext=0)
                     cutouts, cutouts_seg = make_cutouts(
                         binned_data,
                         tile_str=tile_str(tile),
@@ -644,16 +645,9 @@ def process_tile_for_band(
                         seg_mode=seg_mode,
                     )
 
-                # delete raw data
-                delete_file(final_path)
-
                 if tile_info['status'] != 'failed':
                     tile_info['status'] = 'completed'
                     logger.info(f'Successfully processed tile {tile_str(tile)}, band {band}.')
-                    # delete rebinned data + full MTO parameter file only when processing finished without errors
-                    delete_file(param_path)
-                    delete_file(prepped_path)
-
                 else:
                     logger.warning(
                         f'Warning was raised while matching to catalog. Revisit tile {tile_str(tile)}, band {band}.'
@@ -680,6 +674,18 @@ def process_tile_for_band(
                 f'Detections: {tile_info["detection_count"]}.'
             )
 
+            if 'final_path' in locals():
+                # delete raw data
+                delete_file(final_path)
+            if 'param_path' in locals():
+                # delete full MTO parameter file
+                delete_file(param_path)
+            if 'seg_path' in locals():
+                # delete MTO segmentation map
+                delete_file(seg_path)
+            if 'prepped_path' in locals():
+                # delete preprocessed data
+                delete_file(prepped_path)
             # garbage collection to keep memory consumption low
             gc.collect()
 
@@ -728,6 +734,15 @@ def main(
 ):
     # Initialize the database for progress tracking
     init_db(database)
+
+    # # Initialize the connection pool
+    # try:
+    #     connection_pool = init_connection_pool(database, max_connections=num_processing_cores + 1)
+    #     if connection_pool is None:
+    #         raise ValueError('Failed to initialize connection pool')
+    # except Exception as e:
+    #     logger.error(f'Failed to initialize connection pool: {str(e)}')
+    #     return  # Exit the main function if we can't initialize the pool
 
     # Initialize shutdown manager
     killer = GracefulKiller()
@@ -791,10 +806,12 @@ def main(
             database=database,
             tile_availability=availability,
             dwarf_df=input_catalog,
+            in_dict=band_dict,
             process_band=anch_band,
             process_all_bands=process_all_avail,
             only_known_dwarfs=only_known_dwarfs,
         )
+
         unprocessed_jobs_at_start = {band: 0 for band in band_dict.keys()}
 
         for job in unprocessed_jobs:
@@ -947,8 +964,12 @@ def main(
             t.join(timeout=40)
 
         # Start a shutdown worker to handle remaining items in the process queue
+        # shutdown_thread = threading.Thread(
+        #     target=shutdown_worker, args=(database, process_queue, db_lock, all_downloads_complete)
+        # )
         shutdown_thread = threading.Thread(
-            target=shutdown_worker, args=(database, process_queue, db_lock, all_downloads_complete)
+            target=shutdown_worker,
+            args=(database, process_queue, db_lock, all_downloads_complete),
         )
         shutdown_thread.start()
 
@@ -973,6 +994,11 @@ def main(
 
         # Stop the memory tracker
         memory_tracker.stop()
+
+        # if connection_pool:
+        #     connection_pool.close()
+        #     connection_pool = None
+        #     logger.info('Database connection pool closed.')
 
         # Get and log the memory usage statistics
         peak_memory, mean_memory, std_memory, runtime_hours = memory_tracker.get_memory_stats()

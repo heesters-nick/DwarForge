@@ -1,6 +1,7 @@
 import os
 import time
 
+import cv2
 import h5py
 import numpy as np
 import pandas as pd
@@ -139,31 +140,72 @@ def match_cats_older(df_det, df_label, tile, max_sep=15.0):
     return det_matching_idx, label_matches, label_unmatches, det_matches
 
 
-def match_stars(df_det, df_label, max_sep=2.0):
+def match_stars(
+    df_det, df_label, segmap=None, max_sep=5.0, extended_flag_radius=None, mag_limit=14.0
+):
     """
-    Match detections to known objects, return matches, unmatches
-
+    Match detections to known objects, return matches, unmatches, and extended flag indices
     Args:
         df_det (dataframe): detections dataframe
         df_label (dataframe): dataframe of objects with labels
-        max_sep (float): maximum separation tollerance
-
+        max_sep (float): maximum separation tolerance for direct matches
+        extended_flag_radius (float): radius to flag detections as potentially associated with stars
     Returns:
         det_matching_idx (list): indices of detections for which labels are available
         label_matches (dataframe): known objects that were detected
+        label_unmatches (dataframe): known objects that were not detected
         det_matches (dataframe): detections that are known objects
+        extended_flag_idx (list): indices of all detections within extended_flag_radius of known stars
     """
-    c_det = SkyCoord(df_det['ra'], df_det['dec'], unit=u.deg)  # type: ignore
-    c_label = SkyCoord(df_label['ra'], df_label['dec'], unit=u.deg)  # type: ignore
+    c_det = SkyCoord(df_det['ra'], df_det['dec'], unit=u.deg)
+    c_label = SkyCoord(df_label['ra'], df_label['dec'], unit=u.deg)
 
+    # Find closest matches within max_sep
     idx, d2d, _ = c_label.match_to_catalog_3d(c_det)
-    # sep_constraint is a list of True/False
-    sep_constraint = d2d < max_sep * u.arcsec  # type: ignore
+    sep_constraint = d2d < max_sep * u.arcsec
+    det_matching_idx = idx[sep_constraint]
+
     label_matches = df_label[sep_constraint].reset_index(drop=True)
     label_unmatches = df_label[~sep_constraint].reset_index(drop=True)
-    det_matching_idx = idx[sep_constraint]  # det_matching_idx is a list of indices
     det_matches = df_det.loc[det_matching_idx].reset_index(drop=True)
-    return det_matching_idx, label_matches, label_unmatches, det_matches
+
+    extended_flag_idx, extended_flag_mags = None, None
+    if extended_flag_radius is not None:
+        bright_stars = df_label[df_label['Gmag'] < mag_limit].reset_index(drop=True)
+
+        # Create a mask for all bright stars at once using cv2.circle
+        h, w = segmap.shape
+        all_stars_mask = np.zeros((h, w), dtype=np.uint8)
+        for x, y in bright_stars[['x', 'y']].values:
+            x, y = round(x), round(y)
+            if 0 <= x < w and 0 <= y < h:
+                cv2.circle(all_stars_mask, (x, y), round(extended_flag_radius), 1, -1)
+
+        # Find all segment IDs within the masked area
+        segment_ids = np.unique(segmap[all_stars_mask > 0])[1:]  # exclude 0 (background)
+
+        extended_flag_idx = (
+            segment_ids - 1
+        )  # Subtract 1 because SEP IDs start at 1, but DataFrame index starts at 0
+
+        # Find the closest bright star for each flagged segment
+        flagged_segments_centers = df_det.loc[extended_flag_idx, ['xpeak', 'ypeak']].values
+        bright_stars_coords = bright_stars[['x', 'y']].values
+        distances = np.sqrt(
+            np.sum((flagged_segments_centers[:, np.newaxis] - bright_stars_coords) ** 2, axis=2)
+        )
+        closest_star_indices = np.argmin(distances, axis=1)
+
+        extended_flag_mags = bright_stars.loc[closest_star_indices, 'Gmag'].values
+
+    return (
+        det_matching_idx,
+        label_matches,
+        label_unmatches,
+        det_matches,
+        extended_flag_idx,
+        extended_flag_mags,
+    )
 
 
 def match_cats(df_det, df_label, tile, pixel_scale, max_sep=15.0, re_multiplier=3.0):
@@ -539,7 +581,9 @@ def add_redshifts(det_df, z_class_cat):
 
     if len(class_z_df) > 0:
         # match detections to redshift and class catalog
-        det_idx_z_class, label_matches_z_class, _, _ = match_stars(det_df, class_z_df, max_sep=5.0)
+        det_idx_z_class, label_matches_z_class, _, _, _, _ = match_stars(
+            det_df, class_z_df, max_sep=5.0
+        )
         det_idx_z_class = det_idx_z_class.astype(np.int32)  # make sure index is int
 
         if len(det_idx_z_class) > 0:

@@ -12,15 +12,16 @@ from logging_setup import get_logger
 
 logger = get_logger()
 
-from utils import extract_tile_numbers_from_job, get_dwarf_tile_list  # noqa: E402
+from sqlite_utils import retry_on_db_locked  # noqa: E402
+from utils import ensure_list, extract_tile_numbers_from_job, get_dwarf_tile_list  # noqa: E402
 
 
 def init_db(database):
     conn = sqlite3.connect(database)
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS processed_tiles
-                 (tile_id TEXT, 
-                  band TEXT, 
+                 (tile_id TEXT,
+                  band TEXT,
                   start_time REAL,
                   end_time REAL,
                   status TEXT,
@@ -34,72 +35,164 @@ def init_db(database):
     conn.close()
 
 
+# def get_unprocessed_jobs(
+#     database,
+#     tile_availability,
+#     dwarf_df,
+#     in_dict,
+#     process_band=None,
+#     process_all_bands=False,
+#     only_known_dwarfs=False,
+# ):
+#     conn = sqlite3.connect(database)
+#     c = conn.cursor()
+
+#     unprocessed = []
+#     if process_band:
+#         # Get tiles available in the specified band
+#         tiles_to_process = tile_availability.band_tiles(process_band)
+#     else:
+#         tiles_to_process = tile_availability.unique_tiles
+
+#     if only_known_dwarfs:
+#         tiles_with_dwarfs = get_dwarf_tile_list(dwarf_df, in_dict, bands=ensure_list(process_band))
+#         tiles_to_process = [tile for tile in tiles_to_process if tile in tiles_with_dwarfs]
+#         logger.info(f'Tiles with dwarfs in {process_band}: {len(tiles_to_process)}')
+
+#     # test_tiles = [
+#     #     (np.int64(0), np.int64(227)),
+#     #     (np.int64(0), np.int64(228)),
+#     #     (np.int64(0), np.int64(229)),
+#     #     (np.int64(0), np.int64(230)),
+#     #     (np.int64(0), np.int64(231)),
+#     #     (np.int64(269), np.int64(268)),
+#     #     (np.int64(263), np.int64(267)),
+#     #     (np.int64(267), np.int64(258)),
+#     # ]
+
+#     # test_tiles = [
+#     #     (np.int64(45), np.int64(237)),
+#     #     (np.int64(46), np.int64(237)),
+#     #     (np.int64(46), np.int64(238)),
+#     #     (np.int64(53), np.int64(338)),
+#     #     (np.int64(80), np.int64(317)),
+#     #     (np.int64(90), np.int64(325)),
+#     #     (np.int64(93), np.int64(323)),
+#     #     (np.int64(94), np.int64(331)),
+#     #     (np.int64(95), np.int64(321)),
+#     #     (np.int64(98), np.int64(320)),
+#     #     (np.int64(118), np.int64(296)),
+#     #     (np.int64(134), np.int64(295)),
+#     #     (np.int64(153), np.int64(311)),
+#     #     (np.int64(160), np.int64(324)),
+#     #     (np.int64(175), np.int64(282)),
+#     # ]
+
+#     # print(test_tiles)
+#     for tile in tiles_to_process:
+#         available_bands, _ = tile_availability.get_availability(tile)
+#         for band in available_bands:
+#             if process_band and not process_all_bands and band != process_band:
+#                 continue
+
+#             # if only_known_dwarfs:
+#             #     # If processing only known dwarfs, add all tiles regardless of database status
+#             #     unprocessed.append((tile, band))
+#             # else:
+#             c.execute(
+#                 """
+#                 SELECT status
+#                 FROM processed_tiles
+#                 WHERE tile_id = ? AND band = ?
+#             """,
+#                 (str(tile), band),
+#             )
+#             result = c.fetchone()
+#             if result is None or result[0] != 'completed':
+#                 unprocessed.append((tile, band))
+
+#     conn.close()
+#     return unprocessed
+
+
+@retry_on_db_locked()
 def get_unprocessed_jobs(
     database,
     tile_availability,
     dwarf_df,
+    in_dict,
     process_band=None,
     process_all_bands=False,
     only_known_dwarfs=False,
 ):
     conn = sqlite3.connect(database)
-    c = conn.cursor()
 
-    unprocessed = []
-    if process_band:
-        # Get tiles available in the specified band
-        tiles_to_process = tile_availability.band_tiles(process_band)
-    else:
-        tiles_to_process = tile_availability.unique_tiles
+    try:
+        c = conn.cursor()
 
-    if only_known_dwarfs:
-        tiles_with_dwarfs = get_dwarf_tile_list(dwarf_df, bands=list(process_band))
-        tiles_to_process = [tile for tile in tiles_to_process if tile in tiles_with_dwarfs]
-        logger.info(f'Tiles with dwarfs in {process_band}: {len(tiles_to_process)}')
-    # test_tiles = [
-    #     (np.int64(0), np.int64(227)),
-    #     (np.int64(0), np.int64(228)),
-    #     (np.int64(0), np.int64(229)),
-    #     (np.int64(0), np.int64(230)),
-    #     (np.int64(0), np.int64(231)),
-    #     (np.int64(269), np.int64(268)),
-    #     (np.int64(263), np.int64(267)),
-    #     (np.int64(267), np.int64(258)),
-    # ]
+        unprocessed = []
+        if process_band:
+            # Get tiles available in the specified band
+            tiles_to_process = tile_availability.band_tiles(process_band)
+        else:
+            tiles_to_process = tile_availability.unique_tiles
 
-    # test_tiles = [
-    #     (np.int64(45), np.int64(237)),
-    #     (np.int64(46), np.int64(237)),
-    #     (np.int64(46), np.int64(238)),
-    #     (np.int64(53), np.int64(338)),
-    #     (np.int64(80), np.int64(317)),
-    #     (np.int64(90), np.int64(325)),
-    #     (np.int64(93), np.int64(323)),
-    #     (np.int64(94), np.int64(331)),
-    #     (np.int64(95), np.int64(321)),
-    #     (np.int64(98), np.int64(320)),
-    #     (np.int64(118), np.int64(296)),
-    #     (np.int64(134), np.int64(295)),
-    #     (np.int64(153), np.int64(311)),
-    #     (np.int64(160), np.int64(324)),
-    #     (np.int64(175), np.int64(282)),
-    # ]
+        if only_known_dwarfs:
+            tiles_with_dwarfs = get_dwarf_tile_list(
+                dwarf_df, in_dict, bands=ensure_list(process_band)
+            )
+            tiles_to_process = [tile for tile in tiles_to_process if tile in tiles_with_dwarfs]
+            logger.info(f'Tiles with dwarfs in {process_band}: {len(tiles_to_process)}')
 
-    # print(test_tiles)
-    for tile in tiles_to_process:
-        available_bands, _ = tile_availability.get_availability(tile)
-        for band in available_bands:
-            if process_band and not process_all_bands and band != process_band:
-                continue
+        # test_tiles = [
+        #     (np.int64(0), np.int64(227)),
+        #     (np.int64(0), np.int64(228)),
+        #     (np.int64(0), np.int64(229)),
+        #     (np.int64(0), np.int64(230)),
+        #     (np.int64(0), np.int64(231)),
+        #     (np.int64(269), np.int64(268)),
+        #     (np.int64(263), np.int64(267)),
+        #     (np.int64(267), np.int64(258)),
+        # ]
 
-            if only_known_dwarfs:
-                # If processing only known dwarfs, add all tiles regardless of database status
-                unprocessed.append((tile, band))
-            else:
+        # test_tiles = [
+        #     (np.int64(45), np.int64(237)),
+        #     (np.int64(46), np.int64(237)),
+        #     (np.int64(46), np.int64(238)),
+        #     (np.int64(53), np.int64(338)),
+        #     (np.int64(80), np.int64(317)),
+        #     (np.int64(90), np.int64(325)),
+        #     (np.int64(93), np.int64(323)),
+        #     (np.int64(94), np.int64(331)),
+        #     (np.int64(95), np.int64(321)),
+        #     (np.int64(98), np.int64(320)),
+        #     (np.int64(118), np.int64(296)),
+        #     (np.int64(134), np.int64(295)),
+        #     (np.int64(153), np.int64(311)),
+        #     (np.int64(160), np.int64(324)),
+        #     (np.int64(175), np.int64(282)),
+        # ]
+
+        # test_tiles = [(np.int64(243), np.int64(290)), (np.int64(175), np.int64(282))]
+        test_tiles = None
+        if 'test_tiles' in locals() and test_tiles is not None and len(test_tiles) != 0:
+            tiles_to_process = test_tiles
+
+        # print(test_tiles)
+        for tile in tiles_to_process:
+            available_bands, _ = tile_availability.get_availability(tile)
+            for band in available_bands:
+                if process_band and not process_all_bands and band != process_band:
+                    continue
+
+                # if only_known_dwarfs:
+                #     # If processing only known dwarfs, add all tiles regardless of database status
+                #     unprocessed.append((tile, band))
+                # else:
                 c.execute(
                     """
-                    SELECT status 
-                    FROM processed_tiles 
+                    SELECT status
+                    FROM processed_tiles
                     WHERE tile_id = ? AND band = ?
                 """,
                     (str(tile), band),
@@ -107,97 +200,274 @@ def get_unprocessed_jobs(
                 result = c.fetchone()
                 if result is None or result[0] != 'completed':
                     unprocessed.append((tile, band))
-
-    conn.close()
+    finally:
+        conn.close()
     return unprocessed
 
 
+# def update_tile_info(database, tile_info, db_lock):
+#     with db_lock:
+#         conn = sqlite3.connect(database)
+#         c = conn.cursor()
+
+#         fields = ['tile_id', 'band', 'status']
+#         values = [str(tile_info['tile']), tile_info['band'], tile_info['status']]
+
+#         for field in [
+#             'start_time',
+#             'end_time',
+#             'error_message',
+#             'detection_count',
+#             'known_dwarfs_count',
+#             'matched_dwarfs_count',
+#             'unmatched_dwarfs_count',
+#         ]:
+#             if field in tile_info:
+#                 fields.append(field)
+#                 values.append(tile_info[field])
+
+#         placeholders = ', '.join(['?' for _ in fields])
+#         fields_str = ', '.join(fields)
+
+#         query = f"""
+#             INSERT OR REPLACE INTO processed_tiles
+#             ({fields_str})
+#             VALUES ({placeholders})
+#         """
+
+#         c.execute(query, values)
+#         conn.commit()
+#         conn.close()
+
+
+@retry_on_db_locked()
 def update_tile_info(database, tile_info, db_lock):
     with db_lock:
         conn = sqlite3.connect(database)
-        c = conn.cursor()
 
-        fields = ['tile_id', 'band', 'status']
-        values = [str(tile_info['tile']), tile_info['band'], tile_info['status']]
+        try:
+            c = conn.cursor()
 
-        for field in [
-            'start_time',
-            'end_time',
-            'error_message',
-            'detection_count',
-            'known_dwarfs_count',
-            'matched_dwarfs_count',
-            'unmatched_dwarfs_count',
-        ]:
-            if field in tile_info:
-                fields.append(field)
-                values.append(tile_info[field])
+            fields = ['tile_id', 'band', 'status']
+            values = [str(tile_info['tile']), tile_info['band'], tile_info['status']]
 
-        placeholders = ', '.join(['?' for _ in fields])
-        fields_str = ', '.join(fields)
+            for field in [
+                'start_time',
+                'end_time',
+                'error_message',
+                'detection_count',
+                'known_dwarfs_count',
+                'matched_dwarfs_count',
+                'unmatched_dwarfs_count',
+            ]:
+                if field in tile_info:
+                    fields.append(field)
+                    values.append(tile_info[field])
 
-        query = f"""
-            INSERT OR REPLACE INTO processed_tiles 
-            ({fields_str})
-            VALUES ({placeholders})
-        """
+            placeholders = ', '.join(['?' for _ in fields])
+            fields_str = ', '.join(fields)
 
-        c.execute(query, values)
-        conn.commit()
-        conn.close()
+            query = f"""
+                INSERT OR REPLACE INTO processed_tiles
+                ({fields_str})
+                VALUES ({placeholders})
+            """
+
+            c.execute(query, values)
+            conn.commit()
+        finally:
+            conn.close()
 
 
+# @retry_on_db_locked()
+# def update_tile_info(connection_pool, tile_info, db_lock):
+#     with db_lock:
+#         fields = ['tile_id', 'band', 'status']
+#         values = [str(tile_info['tile']), tile_info['band'], tile_info['status']]
+
+#         for field in [
+#             'start_time',
+#             'end_time',
+#             'error_message',
+#             'detection_count',
+#             'known_dwarfs_count',
+#             'matched_dwarfs_count',
+#             'unmatched_dwarfs_count',
+#         ]:
+#             if field in tile_info:
+#                 fields.append(field)
+#                 values.append(tile_info[field])
+
+#         placeholders = ', '.join(['?' for _ in fields])
+#         fields_str = ', '.join(fields)
+
+#         query = f"""
+#             INSERT OR REPLACE INTO processed_tiles
+#             ({fields_str})
+#             VALUES ({placeholders})
+#         """
+
+#         connection_pool.execute(query, values)
+
+
+# def get_progress_summary(
+#     database, tile_availability, bands, unprocessed_jobs_at_start, processed_in_current_run
+# ):
+#     conn = sqlite3.connect(database)
+#     c = conn.cursor()
+
+#     results = {}
+#     for band in bands:
+#         # Get total available tiles for the band
+#         total_available = len(tile_availability.band_tiles(band))
+
+#         # Get overall completed, failed, and in-progress counts
+#         c.execute(
+#             """
+#             SELECT
+#                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+#                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+#                 SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress,
+#                 SUM(CASE WHEN status = 'download_failed' THEN 1 ELSE 0 END) as download_failed
+#             FROM processed_tiles
+#             WHERE band = ?
+#         """,
+#             (band,),
+#         )
+
+#         result = c.fetchone()
+#         total_completed, total_failed, in_progress, download_failed = (
+#             result[0] or 0,
+#             result[1] or 0,
+#             result[2] or 0,
+#             result[3] or 0,
+#         )
+
+#         # Get processed count for the current run
+#         current_run_processed = processed_in_current_run[band]
+
+#         # Calculate remaining jobs in the current run
+#         remaining_in_run = max(0, unprocessed_jobs_at_start[band] - current_run_processed)
+
+#         results[band] = {
+#             'total_available': total_available,
+#             'total_completed': total_completed,
+#             'total_failed': total_failed,
+#             'in_progress': in_progress,
+#             'download_failed': download_failed,
+#             'current_run_processed': current_run_processed,
+#             'remaining_in_run': remaining_in_run,
+#         }
+
+#     conn.close()
+#     return results
+
+
+@retry_on_db_locked()
 def get_progress_summary(
     database, tile_availability, bands, unprocessed_jobs_at_start, processed_in_current_run
 ):
     conn = sqlite3.connect(database)
-    c = conn.cursor()
-
     results = {}
-    for band in bands:
-        # Get total available tiles for the band
-        total_available = len(tile_availability.band_tiles(band))
 
-        # Get overall completed, failed, and in-progress counts
-        c.execute(
-            """
-            SELECT 
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress,
-                SUM(CASE WHEN status = 'download_failed' THEN 1 ELSE 0 END) as download_failed
-            FROM processed_tiles
-            WHERE band = ?
-        """,
-            (band,),
-        )
+    try:
+        c = conn.cursor()
 
-        result = c.fetchone()
-        total_completed, total_failed, in_progress, download_failed = (
-            result[0] or 0,
-            result[1] or 0,
-            result[2] or 0,
-            result[3] or 0,
-        )
+        for band in bands:
+            # Get total available tiles for the band
+            total_available = len(tile_availability.band_tiles(band))
 
-        # Get processed count for the current run
-        current_run_processed = processed_in_current_run[band]
+            # Get overall completed, failed, and in-progress counts
+            c.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                    SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress,
+                    SUM(CASE WHEN status = 'download_failed' THEN 1 ELSE 0 END) as download_failed
+                FROM processed_tiles
+                WHERE band = ?
+            """,
+                (band,),
+            )
 
-        # Calculate remaining jobs in the current run
-        remaining_in_run = max(0, unprocessed_jobs_at_start[band] - current_run_processed)
+            result = c.fetchone()
+            total_completed, total_failed, in_progress, download_failed = (
+                result[0] or 0,
+                result[1] or 0,
+                result[2] or 0,
+                result[3] or 0,
+            )
 
-        results[band] = {
-            'total_available': total_available,
-            'total_completed': total_completed,
-            'total_failed': total_failed,
-            'in_progress': in_progress,
-            'download_failed': download_failed,
-            'current_run_processed': current_run_processed,
-            'remaining_in_run': remaining_in_run,
-        }
+            # Get processed count for the current run
+            current_run_processed = processed_in_current_run[band]
 
-    conn.close()
+            # Calculate remaining jobs in the current run
+            remaining_in_run = max(0, unprocessed_jobs_at_start[band] - current_run_processed)
+
+            results[band] = {
+                'total_available': total_available,
+                'total_completed': total_completed,
+                'total_failed': total_failed,
+                'in_progress': in_progress,
+                'download_failed': download_failed,
+                'current_run_processed': current_run_processed,
+                'remaining_in_run': remaining_in_run,
+            }
+    finally:
+        conn.close()
+
     return results
+
+
+# @retry_on_db_locked()
+# def get_progress_summary(
+#     connection_pool, tile_availability, bands, unprocessed_jobs_at_start, processed_in_current_run
+# ):
+#     results = {}
+#     for band in bands:
+#         # Get total available tiles for the band
+#         total_available = len(tile_availability.band_tiles(band))
+
+#         # Get overall completed, failed, and in-progress counts
+#         result = connection_pool.execute(
+#             """
+#             SELECT
+#                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+#                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+#                 SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress,
+#                 SUM(CASE WHEN status = 'download_failed' THEN 1 ELSE 0 END) as download_failed
+#             FROM processed_tiles
+#             WHERE band = ?
+#         """,
+#             (band,),
+#         )
+
+#         result = result[0] if result else (0, 0, 0, 0)
+#         total_completed, total_failed, in_progress, download_failed = (
+#             result[0] or 0,
+#             result[1] or 0,
+#             result[2] or 0,
+#             result[3] or 0,
+#         )
+
+#         # Get processed count for the current run
+#         current_run_processed = processed_in_current_run[band]
+
+#         # Calculate remaining jobs in the current run
+#         remaining_in_run = max(0, unprocessed_jobs_at_start[band] - current_run_processed)
+
+#         results[band] = {
+#             'total_available': total_available,
+#             'total_completed': total_completed,
+#             'total_failed': total_failed,
+#             'in_progress': in_progress,
+#             'download_failed': download_failed,
+#             'current_run_processed': current_run_processed,
+#             'remaining_in_run': remaining_in_run,
+#         }
+
+#     return results
 
 
 class MemoryTracker:
@@ -354,6 +624,89 @@ def periodic_queue_check(download_queue, process_queue, shutdown_flag):
         time.sleep(60)  # Check every 60 seconds
 
 
+# def generate_summary_report(
+#     database,
+#     tile_availability,
+#     bands_to_report,
+#     unprocessed_jobs_at_start,
+#     processed_in_current_run,
+# ):
+#     progress_results = get_progress_summary(
+#         database,
+#         tile_availability,
+#         bands_to_report,
+#         unprocessed_jobs_at_start,
+#         processed_in_current_run,
+#     )
+
+#     conn = sqlite3.connect(database)
+#     c = conn.cursor()
+
+#     total_jobs = sum(unprocessed_jobs_at_start.values())
+#     total_completed = sum(progress_results[band]['total_completed'] for band in bands_to_report)
+#     total_failed = sum(progress_results[band]['total_failed'] for band in bands_to_report)
+#     total_in_progress = sum(progress_results[band]['in_progress'] for band in bands_to_report)
+#     total_download_failed = sum(
+#         progress_results[band]['download_failed'] for band in bands_to_report
+#     )
+#     total_remaining = sum(progress_results[band]['remaining_in_run'] for band in bands_to_report)
+
+#     c.execute(
+#         """
+#         SELECT AVG(end_time - start_time) / 60.0
+#         FROM processed_tiles
+#         WHERE status = 'completed' AND start_time IS NOT NULL AND end_time IS NOT NULL
+#         """
+#     )
+#     avg_processing_time = c.fetchone()[0]
+
+#     if avg_processing_time is None:
+#         avg_time_str = 'No completed jobs yet'
+#     else:
+#         avg_time_str = f'{avg_processing_time:.2f} minutes'
+
+#     c.execute("SELECT tile_id, band, error_message FROM processed_tiles WHERE status = 'failed'")
+#     failed_jobs = c.fetchall()
+
+#     conn.close()
+
+#     report = f"""
+#     Processing Summary:
+#     -------------------
+#     Total Jobs: {total_jobs}
+#     Completed: {total_completed}
+#     Failed: {total_failed}
+#     Download Failed: {total_download_failed}
+#     In Progress: {total_in_progress}
+#     Remaining: {total_remaining}
+#     Average Processing Time: {avg_time_str}
+
+#     Per-Band Summary:
+#     -----------------
+#     """
+
+#     for band in bands_to_report:
+#         stats = progress_results[band]
+#         report += f"""
+#     Band {band}:
+#         Total Available: {stats['total_available']}
+#         Completed: {stats['total_completed']}
+#         Failed: {stats['total_failed']}
+#         Download Failed: {stats['download_failed']}
+#         In Progress: {stats['in_progress']}
+#         Remaining in Run: {stats['remaining_in_run']}
+#         """
+
+#     report += """
+#     Failed Jobs:
+#     ------------
+#     """
+#     for job in failed_jobs:
+#         report += f'\n\tTile: {extract_tile_numbers_from_job(job[0])}, Band: {job[1]}\n\tError(s):\n\t{job[2]}\n\t'
+
+#     return report
+
+
 def generate_summary_report(
     database,
     tile_availability,
@@ -370,35 +723,41 @@ def generate_summary_report(
     )
 
     conn = sqlite3.connect(database)
-    c = conn.cursor()
 
-    total_jobs = sum(unprocessed_jobs_at_start.values())
-    total_completed = sum(progress_results[band]['total_completed'] for band in bands_to_report)
-    total_failed = sum(progress_results[band]['total_failed'] for band in bands_to_report)
-    total_in_progress = sum(progress_results[band]['in_progress'] for band in bands_to_report)
-    total_download_failed = sum(
-        progress_results[band]['download_failed'] for band in bands_to_report
-    )
-    total_remaining = sum(progress_results[band]['remaining_in_run'] for band in bands_to_report)
+    try:
+        c = conn.cursor()
 
-    c.execute(
-        """
-        SELECT AVG(end_time - start_time) / 60.0
-        FROM processed_tiles 
-        WHERE status = 'completed' AND start_time IS NOT NULL AND end_time IS NOT NULL
-        """
-    )
-    avg_processing_time = c.fetchone()[0]
+        total_jobs = sum(unprocessed_jobs_at_start.values())
+        total_completed = sum(progress_results[band]['total_completed'] for band in bands_to_report)
+        total_failed = sum(progress_results[band]['total_failed'] for band in bands_to_report)
+        total_in_progress = sum(progress_results[band]['in_progress'] for band in bands_to_report)
+        total_download_failed = sum(
+            progress_results[band]['download_failed'] for band in bands_to_report
+        )
+        total_remaining = sum(
+            progress_results[band]['remaining_in_run'] for band in bands_to_report
+        )
 
-    if avg_processing_time is None:
-        avg_time_str = 'No completed jobs yet'
-    else:
-        avg_time_str = f'{avg_processing_time:.2f} minutes'
+        c.execute(
+            """
+            SELECT AVG(end_time - start_time) / 60.0
+            FROM processed_tiles
+            WHERE status = 'completed' AND start_time IS NOT NULL AND end_time IS NOT NULL
+            """
+        )
+        avg_processing_time = c.fetchone()[0]
 
-    c.execute("SELECT tile_id, band, error_message FROM processed_tiles WHERE status = 'failed'")
-    failed_jobs = c.fetchall()
+        if avg_processing_time is None:
+            avg_time_str = 'No completed jobs yet'
+        else:
+            avg_time_str = f'{avg_processing_time:.2f} minutes'
 
-    conn.close()
+        c.execute(
+            "SELECT tile_id, band, error_message FROM processed_tiles WHERE status = 'failed'"
+        )
+        failed_jobs = c.fetchall()
+    finally:
+        conn.close()
 
     report = f"""
     Processing Summary:
@@ -435,6 +794,85 @@ def generate_summary_report(
         report += f'\n\tTile: {extract_tile_numbers_from_job(job[0])}, Band: {job[1]}\n\tError(s):\n\t{job[2]}\n\t'
 
     return report
+
+
+# @retry_on_db_locked()
+# def generate_summary_report(
+#     connection_pool,
+#     tile_availability,
+#     bands_to_report,
+#     unprocessed_jobs_at_start,
+#     processed_in_current_run,
+# ):
+#     progress_results = get_progress_summary(
+#         tile_availability,
+#         bands_to_report,
+#         unprocessed_jobs_at_start,
+#         processed_in_current_run,
+#     )
+
+#     total_jobs = sum(unprocessed_jobs_at_start.values())
+#     total_completed = sum(progress_results[band]['total_completed'] for band in bands_to_report)
+#     total_failed = sum(progress_results[band]['total_failed'] for band in bands_to_report)
+#     total_in_progress = sum(progress_results[band]['in_progress'] for band in bands_to_report)
+#     total_download_failed = sum(
+#         progress_results[band]['download_failed'] for band in bands_to_report
+#     )
+#     total_remaining = sum(progress_results[band]['remaining_in_run'] for band in bands_to_report)
+
+#     avg_processing_time_result = connection_pool.execute(
+#         """
+#         SELECT AVG(end_time - start_time) / 60.0
+#         FROM processed_tiles
+#         WHERE status = 'completed' AND start_time IS NOT NULL AND end_time IS NOT NULL
+#         """
+#     )
+#     avg_processing_time = avg_processing_time_result[0][0] if avg_processing_time_result else None
+
+#     if avg_processing_time is None:
+#         avg_time_str = 'No completed jobs yet'
+#     else:
+#         avg_time_str = f'{avg_processing_time:.2f} minutes'
+
+#     failed_jobs = connection_pool.execute(
+#         "SELECT tile_id, band, error_message FROM processed_tiles WHERE status = 'failed'"
+#     )
+
+#     report = f"""
+#     Processing Summary:
+#     -------------------
+#     Total Jobs: {total_jobs}
+#     Completed: {total_completed}
+#     Failed: {total_failed}
+#     Download Failed: {total_download_failed}
+#     In Progress: {total_in_progress}
+#     Remaining: {total_remaining}
+#     Average Processing Time: {avg_time_str}
+
+#     Per-Band Summary:
+#     -----------------
+#     """
+
+#     for band in bands_to_report:
+#         stats = progress_results[band]
+#         report += f"""
+#     Band {band}:
+#         Total Available: {stats['total_available']}
+#         Completed: {stats['total_completed']}
+#         Failed: {stats['total_failed']}
+#         Download Failed: {stats['download_failed']}
+#         In Progress: {stats['in_progress']}
+#         Remaining in Run: {stats['remaining_in_run']}
+#         """
+
+#     report += """
+#     Failed Jobs:
+#     ------------
+#     """
+#     for job in failed_jobs:
+#         report += f'\n\tTile: {extract_tile_numbers_from_job(job[0])}, Band: {job[1]}\n\tError(s):\n\t{job[2]}\n\t'
+
+#     return report
 
 
 def report_progress_and_memory(
