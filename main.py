@@ -1084,7 +1084,7 @@ if __name__ == '__main__':
         'num_processing_cores': args.processing_cores,
         'mem_track_inter': args.memory_tracking_interval,
         'mem_aggr_period': args.memory_aggregation_period,
-        'database': os.path.join(data_directory, args.database),
+        'database': os.path.join(database_directory, args.database),
         'cut_objects': create_cutouts,
         'cut_size': cutout_size,
         're_lim': re_limit,
