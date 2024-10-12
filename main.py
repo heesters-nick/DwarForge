@@ -16,7 +16,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='dwarforge_g_dwarf_v3',
+    name='dwarforge_i_dwarf_v3',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -159,11 +159,11 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'whigs-g'
+anchor_band = 'ps-i'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
-process_only_known_dwarfs = True
+process_only_known_dwarfs = False
 # define the square cutout size in pixels
 cutout_size = 64
 # minimum surface brightness to select objects
@@ -242,14 +242,17 @@ processed_file = os.path.join(table_directory, 'processed.txt')
 # define the keys for ra, dec, and id in the catalog
 ra_key_script, dec_key_script, id_key_script = 'ra', 'dec', 'ID'
 # define where the information about the currently available tiles should be saved
-tile_info_directory = os.path.join(main_directory, 'tile_info/')
+tile_info_directory = os.path.join(main_directory, 'tile_info')
 os.makedirs(tile_info_directory, exist_ok=True)
 # define where figures should be saved
-figure_directory = os.path.join(main_directory, 'figures/')
+figure_directory = os.path.join(main_directory, 'figures')
 os.makedirs(figure_directory, exist_ok=True)
 # define where the logs should be saved
-log_directory = os.path.join(main_directory, 'logs/')
+log_directory = os.path.join(main_directory, 'logs')
 os.makedirs(log_directory, exist_ok=True)
+# define where the databases should be saved
+database_directory = os.path.join(main_directory, 'databases')
+os.makedirs(database_directory, exist_ok=True)
 
 
 def query_availability(update, in_dict, at_least_key, show_stats, build_kdtree, tile_info_dir):
@@ -734,16 +737,6 @@ def main(
 ):
     # Initialize the database for progress tracking
     init_db(database)
-
-    # # Initialize the connection pool
-    # try:
-    #     connection_pool = init_connection_pool(database, max_connections=num_processing_cores + 1)
-    #     if connection_pool is None:
-    #         raise ValueError('Failed to initialize connection pool')
-    # except Exception as e:
-    #     logger.error(f'Failed to initialize connection pool: {str(e)}')
-    #     return  # Exit the main function if we can't initialize the pool
-
     # Initialize shutdown manager
     killer = GracefulKiller()
     # Initialize job queue and result queue
@@ -963,10 +956,6 @@ def main(
         for t in download_threads:
             t.join(timeout=40)
 
-        # Start a shutdown worker to handle remaining items in the process queue
-        # shutdown_thread = threading.Thread(
-        #     target=shutdown_worker, args=(database, process_queue, db_lock, all_downloads_complete)
-        # )
         shutdown_thread = threading.Thread(
             target=shutdown_worker,
             args=(database, process_queue, db_lock, all_downloads_complete),
@@ -994,11 +983,6 @@ def main(
 
         # Stop the memory tracker
         memory_tracker.stop()
-
-        # if connection_pool:
-        #     connection_pool.close()
-        #     connection_pool = None
-        #     logger.info('Database connection pool closed.')
 
         # Get and log the memory usage statistics
         peak_memory, mean_memory, std_memory, runtime_hours = memory_tracker.get_memory_stats()
@@ -1100,7 +1084,7 @@ if __name__ == '__main__':
         'num_processing_cores': args.processing_cores,
         'mem_track_inter': args.memory_tracking_interval,
         'mem_aggr_period': args.memory_aggregation_period,
-        'database': args.database,
+        'database': os.path.join(data_directory, args.database),
         'cut_objects': create_cutouts,
         'cut_size': cutout_size,
         're_lim': re_limit,

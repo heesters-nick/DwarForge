@@ -53,7 +53,7 @@ class SQLiteConnectionPool:
                 connection.close()
 
 
-def retry_on_db_locked(max_attempts=5, initial_wait=0.1, backoff_factor=2):
+def retry_on_db_locked(max_attempts=10, initial_wait=0.1, backoff_factor=2):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
