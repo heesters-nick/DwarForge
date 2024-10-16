@@ -445,6 +445,8 @@ class TileAvailability:
 
 
 def delete_file(file_path):
+    if file_path is None:
+        return
     try:
         os.remove(file_path)
         logger.debug(f'File {os.path.split(file_path)[1]} has been deleted successfully')
@@ -453,7 +455,9 @@ def delete_file(file_path):
     except PermissionError:
         logger.exception(f'Permission denied: unable to delete {os.path.split(file_path)[1]}')
     except Exception as e:
-        logger.exception(f'An error occurred while deleting the file: {e}')
+        logger.exception(
+            f'An error occurred while deleting the file {os.path.split(file_path)[1]}: {e}'
+        )
 
 
 def tile_str(tile):
@@ -577,7 +581,7 @@ def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
 
     # Convert sky coordinates to pixel coordinates
     x, y = wcs.all_world2pix(ra, dec, 0)
-    x, y = int(x), int(y)
+    x, y = int(np.round(x)), int(np.round(y))
 
     # Calculate pixel scale and radius in pixels
     if 'CDELT1' in header:
@@ -587,7 +591,7 @@ def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
     else:
         raise ValueError('Unable to determine pixel scale from FITS header.')
 
-    radius_pixels = int(np.round(radius_arcsec / pixel_scale))
+    radius_pixels = round(radius_arcsec / pixel_scale)
 
     # Extract the region around the coordinate
     y_min = max(0, y - radius_pixels)
@@ -638,10 +642,13 @@ def open_fits(file_path, fits_ext):
         header (fits header): header of the fits file
     """
     logger.debug(f'Opening fits file {os.path.basename(file_path)}..')
+    start_opening = time.time()
     with fits.open(file_path, memmap=True) as hdul:
         data = hdul[fits_ext].data.astype(np.float32)  # type: ignore
         header = hdul[fits_ext].header  # type: ignore
-    logger.debug(f'Fits file {os.path.basename(file_path)} opened.')
+    logger.debug(
+        f'Fits file {os.path.basename(file_path)} opened in {time.time()-start_opening:.2f} seconds.'
+    )
     return data, header
 
 
@@ -696,8 +703,12 @@ def read_parquet(parquet_path, ra_range, dec_range, columns=None):
     return df
 
 
-def is_mostly_zeros(file_path, fits_ext):
-    data, header = open_fits(file_path, fits_ext)
+def is_mostly_zeros(file_path, fits_ext, band):
+    # HSC data is compressed, decompress for faster read speed later
+    if band in ['whigs-g', 'wishes-z']:
+        data, header = decompress_fits(file_path)
+    else:
+        data, header = open_fits(file_path, fits_ext)
 
     frac_zeros = np.count_nonzero(data == 0.0) / len(data.flatten())
     if frac_zeros > 0.9:
@@ -763,8 +774,14 @@ def decompress_fits(file_path, fits_ext=1):
     Args:
         file_path (str): path to file
         fits_ext (int, optional): data extension. Defaults to 1.
+
+    Returns:
+        data (numpy.ndarray): data
+        header (header): fits header
     """
     data, header = open_fits(file_path, fits_ext=fits_ext)
     new_hdu = fits.PrimaryHDU(data=data.astype(np.float32), header=header)
     # save new fits file
     new_hdu.writeto(file_path, overwrite=True)
+
+    return data, header

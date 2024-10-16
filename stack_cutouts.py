@@ -156,7 +156,7 @@ band_constraint = 1
 # print per tile availability
 print_per_tile_availability = False
 # how to treat the segmentation mask
-segmentation_mode = 'concatenate'
+segmentation_mode = 'concatenate'  # 'concatenate', 'multiply', None
 # process only tiles with known dwarfs
 process_only_known_dwarfs = True
 # cutout objects?

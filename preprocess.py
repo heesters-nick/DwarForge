@@ -47,7 +47,7 @@ def remove_background(
     mask = image > 0
     data_sub = np.where(mask, image - bkg.background, image)
 
-    if save_file:
+    if save_file and file_path is not None:
         directory, filename = os.path.split(file_path)
         # Split the filename into name and extension
         name, extension = os.path.splitext(filename)
@@ -400,7 +400,7 @@ def replace_with_local_background(
 
         star_case, star_border_mask, r_sep = determine_star_case(segmap, x, y, r, object_df)
         star_case_rows.append({'x': x, 'y': y, 'star_case': star_case})
-        border_visualization |= star_border_mask
+        # border_visualization |= star_border_mask
 
         if star_case == 'undetected':
             undetected_stars += 1
@@ -530,15 +530,15 @@ def replace_with_local_background(
             replacement_values = np.random.normal(medians, stds)
             local_region[star_region > 0] = replacement_values
 
-        visualization_mask[y_min:y_max, x_min:x_max, 0] |= star_region.astype(
-            np.uint8
-        )  # Red for star region
-        if bg_segments is not None:
-            visualization_mask[y_min:y_max, x_min:x_max, 1] |= bg_segments.astype(
-                np.uint8
-            )  # Green for background segments
+        # visualization_mask[y_min:y_max, x_min:x_max, 0] |= star_region.astype(
+        #     np.uint8
+        # )  # Red for star region
+        # if bg_segments is not None:
+        #     visualization_mask[y_min:y_max, x_min:x_max, 1] |= bg_segments.astype(
+        #         np.uint8
+        #     )  # Green for background segments
 
-        replaced_stars_mask[y_min:y_max, x_min:x_max] |= star_region.astype(np.uint8)
+        # replaced_stars_mask[y_min:y_max, x_min:x_max] |= star_region.astype(np.uint8)
         result[y_min:y_max, x_min:x_max] = local_region
 
     logger.debug(f'Skipped {skipped_stars}/{total_stars} stars.')
@@ -923,7 +923,17 @@ def bin_image_cv2(image, bin_size):
     )
 
 
-def mask_hot_pixels(image, threshold, bkg, max_size=3, sigma=5, neighbor_ratio=0.2):
+def mask_hot_pixels(
+    image,
+    header,
+    file_path,
+    threshold,
+    bkg,
+    max_size=3,
+    sigma=5,
+    neighbor_ratio=0.2,
+    save_file=False,
+):
     # Create a mask of pixels above the threshold
     hot_pixels = image > threshold
     neighbor_threshold = bkg.background_median + sigma * bkg.background_rms_median
@@ -965,7 +975,12 @@ def mask_hot_pixels(image, threshold, bkg, max_size=3, sigma=5, neighbor_ratio=0
     )
 
     # Calculate the ratio of surrounding pixels below threshold
-    below_threshold_ratio = below_threshold_sum / surrounding_pixels_count
+    below_threshold_ratio = np.divide(
+        below_threshold_sum,
+        surrounding_pixels_count,
+        where=surrounding_pixels_count != 0,
+        out=np.zeros_like(below_threshold_sum),
+    )
 
     # Create a mask for hot pixels based on the ratio
     hot_pixel_mask = np.zeros_like(image, dtype=bool)
@@ -976,6 +991,15 @@ def mask_hot_pixels(image, threshold, bkg, max_size=3, sigma=5, neighbor_ratio=0
     # Create a copy of the image and mask the hot pixels
     masked_image = image.copy()
     masked_image[hot_pixel_mask] = np.median(image)  # Replace with median value
+
+    if save_file and file_path is not None:
+        directory, filename = os.path.split(file_path)
+        name, extension = os.path.splitext(filename)
+        new_filename = f'{name}_hot_mask{extension}'
+        out_path = os.path.join(directory, new_filename)
+        new_hdu = fits.PrimaryHDU(data=masked_image.astype(np.float32), header=header)
+        # save new fits file
+        new_hdu.writeto(out_path, overwrite=True)
 
     return masked_image, hot_pixel_mask
 
@@ -993,8 +1017,9 @@ def prep_tile(tile, file_path, fits_ext, zp, band, bin_size=4):
         str, str: path to preprocessed file, header of preprocessed file
     """
     prep_start = time.time()
-    # read in data and header
-    data, header = open_fits(file_path, fits_ext)
+    # read in data and header, fits_ext is always 0 after decompressing and
+    # saving data to the 0th extension in the g and z band
+    data, header = open_fits(file_path, fits_ext=0)
     # bin image to increase signal-to-noise + aid LSB detection
     binned_image = bin_image_cv2(data, bin_size)
     # save binned image to fits
@@ -1007,9 +1032,10 @@ def prep_tile(tile, file_path, fits_ext, zp, band, bin_size=4):
         data_binned,
         header_binned,
         file_path_binned,
+        zero_threshold=0.005,
         replace_anomaly=True,
         dilate_mask=True,
-        save_to_file=True,
+        save_to_file=False,
     )
     logger.debug(f'{tile_str(tile)}: detected anomalies in {time.time()-start:.2f} seconds.')
     # estimate the background
@@ -1026,7 +1052,15 @@ def prep_tile(tile, file_path, fits_ext, zp, band, bin_size=4):
     # mask hot pixels
     start = time.time()
     data_ano_mask, _ = mask_hot_pixels(
-        data_ano_mask, threshold=70, bkg=bkg, max_size=3, sigma=3, neighbor_ratio=0.2
+        data_ano_mask,
+        header_binned,
+        file_path_binned,
+        threshold=70,
+        bkg=bkg,
+        max_size=3,
+        sigma=3,
+        neighbor_ratio=0.2,
+        save_file=False,
     )
     logger.debug(f'{tile_str(tile)}: masked hot pixels in {time.time()-start:.2f} seconds.')
     # find stars in the image from gaia
@@ -1038,12 +1072,13 @@ def prep_tile(tile, file_path, fits_ext, zp, band, bin_size=4):
         objects_sep, data_sub_sep, bkg_sep, segmap_sep = source_detection_with_dynamic_limit(
             data_ano_mask,
             header_binned,
-            file_path,
+            file_path_binned,
             sorted_star_df,
             thresh=1.0,
             minarea=4,
             deblend_nthresh=32,
             deblend_cont=0.0005,
+            bkg_dim=50,
             save_segmap=False,
             extended_flag_radius=9.0,
             mag_limit=14.0,
@@ -1067,16 +1102,16 @@ def prep_tile(tile, file_path, fits_ext, zp, band, bin_size=4):
             start_dilate = time.time()
             (
                 data_ano_mask,
-                bg_mean,
-                bg_median,
-                bg_std,
+                bkg_mean,
+                bkg_median,
+                bkg_std,
                 ring_mask,
                 dilated_mask,
                 large_objects_mask,
             ) = correct_oversubtracted_background(
                 data_ano_mask,
-                file_path,
-                header,
+                file_path_binned,
+                header_binned,
                 segmap_sep,
                 grid_size=25,
                 dilation_size=65,

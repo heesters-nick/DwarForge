@@ -16,7 +16,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='dwarforge_i_dwarf_v3',
+    name='dwarforge_r_dwarf_v3',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -96,7 +96,7 @@ band_dictionary = {
         'vos': 'vos:cfis/whigs/stack_images_CFIS_scheme/',
         'suffix': '.fits',
         'delimiter': '_',
-        'fits_ext': 0,
+        'fits_ext': 1,
         'zfill': 0,
         'zp': 27.0,
     },
@@ -159,7 +159,7 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'ps-i'
+anchor_band = 'cfis_lsb-r'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
@@ -565,12 +565,13 @@ def process_tile_for_band(
         logger.info(f'Started processing tile {tile_str(tile)}, band {band}.')
 
         try:
-            if is_mostly_zeros(file_path=final_path, fits_ext=fits_ext):
+            if is_mostly_zeros(file_path=final_path, fits_ext=fits_ext, band=band):
                 tile_info['status'] = 'skipped_mostly_zeros'
                 logger.info(
                     f'Skipped tile {tile_str(tile)}, band {band} as it contains mostly zeros.'
                 )
                 tile_info['detection_count'] = 0
+                param_path, seg_path, prepped_path = None, None, None
                 delete_file(final_path)
             else:
                 # Preprocess (bin)
@@ -677,16 +678,20 @@ def process_tile_for_band(
                 f'Detections: {tile_info["detection_count"]}.'
             )
 
-            if 'final_path' in locals():
+            if 'final_path' in locals() and final_path is not None and os.path.isfile(final_path):
                 # delete raw data
                 delete_file(final_path)
-            if 'param_path' in locals():
+            if 'param_path' in locals() and param_path is not None and os.path.isfile(param_path):
                 # delete full MTO parameter file
                 delete_file(param_path)
-            if 'seg_path' in locals():
+            if 'seg_path' in locals() and seg_path is not None and os.path.isfile(seg_path):
                 # delete MTO segmentation map
                 delete_file(seg_path)
-            if 'prepped_path' in locals():
+            if (
+                'prepped_path' in locals()
+                and prepped_path is not None
+                and os.path.isfile(prepped_path)
+            ):
                 # delete preprocessed data
                 delete_file(prepped_path)
             # garbage collection to keep memory consumption low
@@ -909,7 +914,7 @@ def main(
                 stats = progress_results[band]
                 log_messages.append(f'\nProgress for band {band}:')
                 log_messages.append(
-                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed"
+                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed, {stats['mostly_zeros']} mostly_zeros"
                 )
                 log_messages.append(
                     f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['remaining_in_run']} remaining"

@@ -74,7 +74,7 @@ def get_unprocessed_jobs(
         #     (np.int64(263), np.int64(267)),
         #     (np.int64(267), np.int64(258)),
         # ]
-
+        test_tiles = None
         # test_tiles = [
         #     (np.int64(45), np.int64(237)),
         #     (np.int64(46), np.int64(237)),
@@ -93,8 +93,7 @@ def get_unprocessed_jobs(
         #     (np.int64(175), np.int64(282)),
         # ]
 
-        # test_tiles = [(np.int64(243), np.int64(290)), (np.int64(175), np.int64(282))]
-        test_tiles = None
+        # test_tiles = [(np.int64(243), np.int64(290)), (np.int64(276), np.int64(274))]
         if 'test_tiles' in locals() and test_tiles is not None and len(test_tiles) != 0:
             tiles_to_process = test_tiles
 
@@ -118,7 +117,7 @@ def get_unprocessed_jobs(
                     (str(tile), band),
                 )
                 result = c.fetchone()
-                if result is None or result[0] != 'completed':
+                if result is None or result[0] not in ['completed', 'skipped_mostly_zeros']:
                     unprocessed.append((tile, band))
     finally:
         conn.close()
@@ -185,7 +184,8 @@ def get_progress_summary(
                     SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
                     SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress,
-                    SUM(CASE WHEN status = 'download_failed' THEN 1 ELSE 0 END) as download_failed
+                    SUM(CASE WHEN status = 'download_failed' THEN 1 ELSE 0 END) as download_failed,
+                    SUM(CASE WHEN status = 'skipped_mostly_zeros' THEN 1 ELSE 0 END) as mostly_zeros
                 FROM processed_tiles
                 WHERE band = ?
             """,
@@ -193,11 +193,12 @@ def get_progress_summary(
             )
 
             result = c.fetchone()
-            total_completed, total_failed, in_progress, download_failed = (
+            total_completed, total_failed, in_progress, download_failed, mostly_zeros = (
                 result[0] or 0,
                 result[1] or 0,
                 result[2] or 0,
                 result[3] or 0,
+                result[4] or 0,
             )
 
             # Get processed count for the current run
@@ -214,6 +215,7 @@ def get_progress_summary(
                 'download_failed': download_failed,
                 'current_run_processed': current_run_processed,
                 'remaining_in_run': remaining_in_run,
+                'mostly_zeros': mostly_zeros,
             }
     finally:
         conn.close()
@@ -405,6 +407,7 @@ def generate_summary_report(
         total_remaining = sum(
             progress_results[band]['remaining_in_run'] for band in bands_to_report
         )
+        total_mostly_zeros = sum(progress_results[band]['mostly_zeros'] for band in bands_to_report)
 
         c.execute(
             """
@@ -434,6 +437,7 @@ def generate_summary_report(
     Completed: {total_completed}
     Failed: {total_failed}
     Download Failed: {total_download_failed}
+    Mostly Zeros: {total_mostly_zeros}
     In Progress: {total_in_progress}
     Remaining: {total_remaining}
     Average Processing Time: {avg_time_str}
@@ -450,6 +454,7 @@ def generate_summary_report(
         Completed: {stats['total_completed']}
         Failed: {stats['total_failed']}
         Download Failed: {stats['download_failed']}
+        Mostly Zeros: {stats['mostly_zeros']}
         In Progress: {stats['in_progress']}
         Remaining in Run: {stats['remaining_in_run']}
         """
@@ -490,7 +495,7 @@ def report_progress_and_memory(
                 stats = progress_results[band]
                 log_messages.append(f'\nProgress for band {band}:')
                 log_messages.append(
-                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed"
+                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed, {stats['mostly_zeros']} mostly zeros"
                 )
                 log_messages.append(
                     f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['remaining_in_run']} remaining"

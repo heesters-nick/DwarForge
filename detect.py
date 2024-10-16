@@ -208,9 +208,9 @@ def source_detection(
     minarea=5,
     deblend_nthresh=32,
     deblend_cont=0.005,
-    bkg_dim=100,
+    bkg_dim=50,
     save_segmap=False,
-    extended_flag_radius=18.0,
+    extended_flag_radius=9.0,
     mag_limit=14.0,
 ):
     """
@@ -297,8 +297,9 @@ def source_detection_with_dynamic_limit(
     minarea=4,
     deblend_nthresh=32,
     deblend_cont=0.0005,
+    bkg_dim=50,
     save_segmap=False,
-    extended_flag_radius=18.0,
+    extended_flag_radius=9.0,
     mag_limit=14.0,
     initial_limit=500000,
     max_limit=10000000,
@@ -306,6 +307,7 @@ def source_detection_with_dynamic_limit(
 ):
     current_limit = initial_limit
     sep.set_extract_pixstack(current_limit)
+    sep.set_sub_object_limit(1024)
 
     while current_limit <= max_limit:
         try:
@@ -318,6 +320,7 @@ def source_detection_with_dynamic_limit(
                 minarea=minarea,
                 deblend_nthresh=deblend_nthresh,
                 deblend_cont=deblend_cont,
+                bkg_dim=bkg_dim,
                 save_segmap=save_segmap,
                 extended_flag_radius=extended_flag_radius,
                 mag_limit=mag_limit,
@@ -357,6 +360,8 @@ def detect_anomaly(
 
     # replace nan values with zeros
     image[np.isnan(image)] = 0.0
+    # replace saturated pixels with zeros
+    image[image >= 65536] = 0.0
     # replace highly negative values with zeros
     if band == 'ps-i':
         image[image < -2.0] = 0.0
@@ -416,6 +421,7 @@ def detect_anomaly(
     if replace_anomaly:
         image[global_mask] = 0.0
 
+    out_path = None
     if save_to_file:
         directory, filename = os.path.split(file_path)
         name, extension = os.path.splitext(filename)
