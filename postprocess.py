@@ -1,5 +1,8 @@
+import glob
 import os
 import time
+from itertools import combinations
+from typing import Dict, Tuple
 
 import cv2
 import h5py
@@ -7,6 +10,7 @@ import numpy as np
 import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from astropy.wcs import WCS
 
 from logging_setup import get_logger
 from utils import (
@@ -335,6 +339,8 @@ def cutout2d_segmented(data, tile_str, segmap, object_id, x, y, size, cutout_in,
     elif seg_mode == 'concatenate':
         cutout_in[cutout_slice] = data[data_slice]
         cutout_seg[cutout_slice] = data_ones[data_slice] * (segmap[data_slice] == object_id)
+    else:
+        cutout_in[cutout_slice] = data[data_slice]
 
     return cutout_in, cutout_seg
 
@@ -367,24 +373,44 @@ def create_segmented_cutouts(data, tile_str, segmap, object_ids, xs, ys, cutout_
     return cutouts, cutouts_seg
 
 
-def make_cutouts(data, tile_str, df, segmap, cutout_size=64, seg_mode='multiply'):
+def make_cutouts(
+    data,
+    header,
+    tile_str,
+    df=None,
+    ra=None,
+    dec=None,
+    segmap=None,
+    cutout_size=64,
+    seg_mode='multiply',
+):
     """
     Makes cutouts from the objects passed in the dataframe, data is multiplied
     with the corresponding detection segment.
 
     Args:
         data (numpy.ndarray): image
+        header (header): fits header
         tile_str (str): tile numbers
-        df (dataframe): object dataframe
-        segmap (numpy.ndarray): segmentation map
+        df (dataframe, optional): object dataframe. Defaults to None
+        ra (numpy.ndarray, optional): right ascention array. Defaults to None
+        dec (numpy.ndarray, optional): declination array. Defaults to None
+        segmap (numpy.ndarray, optional): segmentation map. Defaults to None
         cutout_size (int, optional): square cutout size. Defaults to 64.
+        seg_mode (multiply, optional): segmentation mode. Defaults to 'multiply'
 
     Returns:
         numpy.ndarray: cutouts of shape (n_cutouts, cutout_size, cutout_size)
     """
-    xs = np.floor(df.X.values + 0.5).astype(np.int32)
-    ys = np.floor(df.Y.values + 0.5).astype(np.int32)
-    object_ids = df['ID'].values  # Assuming the index is the object ID
+    if df is not None:
+        xs = np.floor(df.X.values + 0.5).astype(np.int32)
+        ys = np.floor(df.Y.values + 0.5).astype(np.int32)
+        object_ids = df['ID'].values  # Assuming the index is the object ID
+    elif ra is not None and dec is not None:
+        wcs = WCS(header)
+        xs, ys = wcs.all_world2pix(ra, dec, 0)
+        xs, ys = np.floor(xs + 0.5).astype(np.int32), np.floor(ys + 0.5).astype(np.int32)
+        object_ids = np.zeros(len(xs))
 
     cutout_start = time.time()
     cutouts, cutouts_seg = create_segmented_cutouts(
@@ -476,19 +502,293 @@ def add_redshifts(det_df, z_class_cat):
     return det_df
 
 
-def match_coordinates(reference_coords, target_coords, max_sep=15.0):
+def match_coordinates(band1, band2, band_data, max_sep=15.0):
     """
     Match reference coordinates to target coordinates.
 
     Args:
-        reference_coords (SkyCoord): Reference coordinates
-        target_coords (SkyCoord): Target coordinates to match against
+        band1 (str): first band
+        band2 (str) (str): second band
+        band_data (dict): band data
         max_sep (float): Maximum separation in arcseconds
 
     Returns:
         matched_ref_indices (array): Indices of matched reference coordinates
         matched_target_indices (array): Indices of matched target coordinates
     """
+    reference_coords = SkyCoord(band_data[band1]['ra'], band_data[band1]['dec'], unit=u.deg)
+    target_coords = SkyCoord(band_data[band2]['ra'], band_data[band2]['dec'], unit=u.deg)
     idx, d2d, _ = reference_coords.match_to_catalog_3d(target_coords)
     mask = d2d < max_sep * u.arcsec
     return np.where(mask)[0], idx[mask]
+
+
+def match_coordinates_across_bands(
+    band_data: Dict[str, Dict], max_sep: float, tile: tuple
+) -> Tuple[
+    np.ndarray, Dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
+    band_names = list(band_data.keys())
+    all_matches = {}
+
+    for band1, band2 in combinations(band_names, 2):
+        idx1, idx2 = match_coordinates(band1, band2, band_data, max_sep=max_sep)
+        all_matches[f'{band1}|{band2}'] = np.column_stack((idx1, idx2))
+
+    num_objects = max(len(band_data[band]['ra']) for band in band_names)
+
+    # Create a unique object ID for each detection in each band
+    object_id_map = {band: np.arange(len(band_data[band]['ra'])) for band in band_names}
+
+    # Track unique objects across all bands
+    unique_objects = {}
+    object_to_unique = {band: {} for band in band_names}
+
+    for match_key, matches in all_matches.items():
+        band1, band2 = match_key.split('|')
+        for idx1, idx2 in matches:
+            obj1 = object_id_map[band1][idx1]
+            obj2 = object_id_map[band2][idx2]
+
+            if obj1 in object_to_unique[band1] and obj2 in object_to_unique[band2]:
+                # Both objects are already matched, ensure they point to the same unique object
+                unique_id1 = object_to_unique[band1][obj1]
+                unique_id2 = object_to_unique[band2][obj2]
+                if unique_id1 != unique_id2:
+                    # Merge the two unique objects
+                    unique_objects[unique_id1].update(unique_objects[unique_id2])
+                    for b, idx in unique_objects[unique_id2]:
+                        object_to_unique[b][object_id_map[b][idx]] = unique_id1
+                    del unique_objects[unique_id2]
+            elif obj1 in object_to_unique[band1]:
+                # Object in band1 is already matched, add band2 object to the same unique object
+                unique_id = object_to_unique[band1][obj1]
+                unique_objects[unique_id].add((band2, idx2))
+                object_to_unique[band2][obj2] = unique_id
+            elif obj2 in object_to_unique[band2]:
+                # Object in band2 is already matched, add band1 object to the same unique object
+                unique_id = object_to_unique[band2][obj2]
+                unique_objects[unique_id].add((band1, idx1))
+                object_to_unique[band1][obj1] = unique_id
+            else:
+                # New unique object
+                unique_id = len(unique_objects)
+                unique_objects[unique_id] = {(band1, idx1), (band2, idx2)}
+                object_to_unique[band1][obj1] = unique_id
+                object_to_unique[band2][obj2] = unique_id
+
+    # Process single-band LSB objects
+    for band in band_names:
+        df = band_data[band]['df']
+        if 'lsb' in df.columns:
+            lsb_mask = df['lsb'] == 1  # Assuming 1 indicates LSB objects
+            for idx in df.index[lsb_mask]:
+                if object_id_map[band][idx] not in object_to_unique[band]:
+                    logger.warning(
+                        f'tile: {tile}, dwarf {df.loc[idx, 'ID_known']} was only detected in {band}.'
+                    )
+                    unique_id = len(unique_objects)
+                    unique_objects[unique_id] = {(band, idx)}
+                    object_to_unique[band][object_id_map[band][idx]] = unique_id
+
+    # Process unique objects
+    multi_band_objects = []
+    object_indices = {band: np.full(num_objects, -1, dtype=int) for band in band_names}
+    final_ra = []
+    final_dec = []
+    known_ids = []
+    labels = []
+    zspecs = []
+
+    for unique_id, detections in unique_objects.items():
+        # Include objects detected in at least 2 out of 3 bands and all LSB objects
+        # even if detected in only one band
+        if len(detections) >= 2 or any(
+            band_data[band]['df'].loc[idx, 'lsb'] == 1 for band, idx in detections
+        ):
+            multi_band_objects.append(unique_id)
+            first_band, first_idx = next(iter(detections))
+
+            for band, idx in detections:
+                object_indices[band][idx] = unique_id
+
+            final_ra.append(band_data[first_band]['ra'][first_idx])
+            final_dec.append(band_data[first_band]['dec'][first_idx])
+            known_ids.append(
+                band_data[first_band]['df'].loc[first_idx, 'ID_known']
+                if 'ID_known' in band_data[first_band]['df'].columns
+                else ''
+            )
+            labels.append(
+                band_data[first_band]['df'].loc[first_idx, 'lsb']
+                if 'lsb' in band_data[first_band]['df'].columns
+                else np.nan
+            )
+            zspecs.append(
+                band_data[first_band]['df'].loc[first_idx, 'zspec']
+                if 'zspec' in band_data[first_band]['df'].columns
+                else np.nan
+            )
+
+    return (
+        np.array(multi_band_objects),
+        object_indices,
+        np.array(final_ra),
+        np.array(final_dec),
+        np.array(known_ids),
+        np.array(labels),
+        np.array(zspecs),
+    )
+
+
+def read_band_data(parent_dir, tile_dir, tile, band, in_dict, seg_mode):
+    # Read the full image, segmentation map, and catalog
+    zfill = in_dict[band]['zfill']
+    file_prefix = in_dict[band]['name']
+    delimiter = in_dict[band]['delimiter']
+    suffix = in_dict[band]['suffix']
+    num1, num2 = str(tile[0]).zfill(zfill), str(tile[1]).zfill(zfill)
+    filename_prefix = f'{file_prefix}{delimiter}{num1}{delimiter}{num2}{suffix}'
+    data_path = os.path.join(parent_dir, tile_dir, band, filename_prefix + '_rebin.fits')
+    data, header = open_fits(data_path, fits_ext=0)
+    path, extension = os.path.splitext(data_path)
+
+    if seg_mode is not None:
+        seg_pattern = f'{path}*_seg.fits'
+        seg_path = glob.glob(seg_pattern)
+        segmap, _ = open_fits(seg_path, fits_ext=0)
+    else:
+        segmap = None
+
+    det_pattern = f'{path}*_det_params.parquet'
+    det_path = glob.glob(det_pattern)
+    det_df = pd.read_parquet(det_path)
+    # filter det_df for each band before performing matching
+    # exclude likely non-dwarfs beforehand
+    det_df = filter_candidates(df=det_df, tile=tile, band=band)
+
+    return data, header, segmap, det_df['ra'].values, det_df['dec'].values, det_df
+
+
+def filter_candidates(df, tile, band):
+    df_mod = df.copy()
+    df_dwarf = df.loc[df['lsb'] == 1].reset_index(drop=True)
+
+    # Define band-specific conditions
+    band_conditions = {
+        'cfis_lsb-r': {
+            'basic': {
+                'mu': (22.0, None),  # (min, max), None means no limit
+                're_arcsec': (1.6, 55.0),
+                'axis_ratio': (0.17, None),
+                'r_10_arcsec': (0.353, 18.2),
+                'r_25_arcsec': (0.4, 32.1),
+                'r_75_arcsec': (2.16, 102.1),
+                'r_90_arcsec': (2.5, 145.1),
+                'r_100_arcsec': (2.8, 254.1),
+                'r_fwhm_arcsec': (0.4, 13.8),
+                'mu_median': (0.34, 28.7),
+                'mu_mean': (0.4, 65.1),
+                'mu_max': (2.0, 6255.0),
+                'total_flux': (55, None),
+                'mag': (12.17, 25.7),
+            },
+            'complex': [
+                lambda df_mod: (df_mod['mu'] > (0.6155 * df_mod['mag'] + 11.3832))
+                & (df_mod['mu'] > (1.35 * df_mod['mag'] - 6.4)),
+                lambda df_mod: (df_mod['mu'] / df_mod['r_75_arcsec'])
+                < np.maximum(1.51 * df_mod['mag'] - 24.6, 3.0),
+                lambda df_mod: np.log(df_mod['r_90_arcsec'] / df_mod['r_75_arcsec'])
+                < (0.295 * np.log(df_mod['r_100_arcsec']) - 0.13),
+            ],
+        },
+        'whigs-g': {
+            'basic': {
+                'mu': (22.51, None),  # (min, max), None means no limit
+                're_arcsec': (1.6, None),
+                'axis_ratio': (0.17, None),
+                'r_10_arcsec': (0.4, 8.1),
+                'r_25_arcsec': (0.72, 15.0),
+                'r_75_arcsec': (2.17, 42.0),
+                'r_90_arcsec': (2.47, 54.0),
+                'r_100_arcsec': (2.8, 79.0),
+                'r_fwhm_arcsec': (0.417, 13.5),
+                'mu_median': (0.0072, 0.8),
+                'mu_mean': (0.017, 2.01),
+                'mu_max': (0.066, 226.0),
+                'total_flux': (1.77, None),
+                'mag': (16.0, 26.5),
+            },
+            'complex': [
+                lambda df_mod: (df_mod['mu'] > (0.7063 * df_mod['mag'] + 9.4420))
+                & (df_mod['mu'] > (4.1 * df_mod['mag'] - 78.0)),
+                lambda df_mod: np.log(df_mod['r_100_arcsec'] / df_mod['r_90_arcsec'])
+                < (-1.2615 * np.log(df_mod['mag']) + 4.3000),
+                lambda df_mod: np.log(df_mod['mag'] / df_mod['r_75_arcsec'])
+                < np.maximum(6.4500 * np.log(df_mod['mag']) + -17.9000, 0.75),
+            ],
+        },
+        'ps-i': {
+            'basic': {
+                'mu': (22.0, 29.5),  # (min, max), None means no limit
+                're_arcsec': (1.6, 41),
+                'axis_ratio': (0.17, None),
+                'r_10_arcsec': (0.4, 15.2),
+                'r_25_arcsec': (0.8, 26.5),
+                'r_75_arcsec': (2.1, 58.0),
+                'r_90_arcsec': (2.5, 77.0),
+                'r_100_arcsec': (2.7, 142.0),
+                'r_fwhm_arcsec': (0.4, 18.2),
+                'mu_median': (0.28, 34.0),
+                'mu_mean': (0.3, 73.0),
+                'mu_max': (1.46, 4426.0),
+                'total_flux': (39.0, None),
+                'mag': (12.6, 26.5),
+            },
+            'complex': [
+                lambda df_mod: (df_mod['r_90_arcsec'] / df_mod['r_75_arcsec'])
+                < (0.0100 * df_mod['r_100_arcsec'] + 1.4000),
+                lambda df_mod: (df_mod['r_100_arcsec'] / df_mod['r_90_arcsec'])
+                < (-0.0850 * df_mod['mag'] + 3.3000),
+                lambda df_mod: (df_mod['mag'] / df_mod['r_75_arcsec'])
+                < np.maximum(1.4 * df_mod['mag'] - 23, 2.5),
+                lambda df_mod: (df_mod['r_90_arcsec'] / df_mod['r_75_arcsec'])
+                < (-0.0700 * df_mod['mag'] + 3.0000),
+                lambda df_mod: (df_mod['r_75_arcsec'] / df_mod['r_25_arcsec'])
+                < (0.2 * df_mod['mag'] + 2.3),
+                lambda df_mod: np.log(df_mod['r_100_arcsec'] / df_mod['r_75_arcsec'])
+                < (-2.7 * np.log(df_mod['mag']) + 9.05),
+                lambda df_mod: np.log(df_mod['r_75_arcsec'] / df_mod['r_25_arcsec'])
+                < (-0.9631 * np.log(df_mod['mag']) + 4.5500),
+            ],
+        },
+    }
+
+    if band not in band_conditions:
+        logger.error(f'Conditions not implemented for band {band}.')
+        return None
+
+    conditions = band_conditions[band]
+
+    # Apply basic conditions
+    for column, (min_val, max_val) in conditions['basic'].items():
+        if min_val is not None:
+            df_mod = df_mod[df_mod[column] > min_val]
+        if max_val is not None:
+            df_mod = df_mod[df_mod[column] < max_val]
+
+    # Apply complex conditions
+    for condition in conditions['complex']:
+        df_mod = df_mod[condition]
+
+    # Reset index
+    df_mod = df_mod.reset_index(drop=True)
+
+    logger.debug(
+        f'{tile}, {band}: filtered out {len(df.loc[df["lsb"]==1])-len(df_mod.loc[df_mod["lsb"]==1])}/{len(df_dwarf)} dwarfs.'
+    )
+    logger.debug(
+        f'{tile}, {band}: filtered out {len(df.loc[df["lsb"].isna()])-len(df_mod.loc[df_mod["lsb"].isna()])}/{len(df.loc[df["lsb"].isna()])} other objects.'
+    )
+
+    return df_mod

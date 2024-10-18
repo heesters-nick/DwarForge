@@ -3,7 +3,6 @@ import glob
 import logging
 import multiprocessing
 import os  # noqa: E402
-import subprocess
 import time
 import warnings  # noqa: E402
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -12,15 +11,15 @@ from datetime import timedelta
 import h5py
 import numpy as np
 import pandas as pd
-from astropy import units as u
 from astropy.coordinates import SkyCoord
+from scipy.spatial import cKDTree
 from tqdm import tqdm
 
 from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='fuse_cutouts',
+    name='fuse_cutouts_test',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -29,8 +28,14 @@ import psutil  # noqa: E402
 from vos import Client  # noqa: E402
 
 from kd_tree import build_tree  # noqa: E402
-from postprocess import load_segmap, make_cutouts, match_coordinates, save_to_h5  # noqa: E402
-from tile_cutter import read_h5, tile_finder  # noqa: E402
+from postprocess import (  # noqa: E402
+    load_segmap,
+    make_cutouts,
+    match_coordinates_across_bands,
+    read_band_data,
+    save_to_h5,
+)
+from tile_cutter import tile_finder  # noqa: E402
 from utils import (  # noqa: E402
     TileAvailability,
     extract_tile_numbers,
@@ -38,7 +43,6 @@ from utils import (  # noqa: E402
     load_available_tiles,
     open_fits,
     tile_str,
-    transform_path,
     update_available_tiles,
 )
 
@@ -156,14 +160,17 @@ band_constraint = 1
 # print per tile availability
 print_per_tile_availability = False
 # how to treat the segmentation mask
-segmentation_mode = 'concatenate'  # 'concatenate', 'multiply', None
+segmentation_mode = None  # 'concatenate', 'multiply', None
 # process only tiles with known dwarfs
 process_only_known_dwarfs = True
 # cutout objects?
 cutout_objects = True
 # cutout size
 cutout_size = 64
-
+# maximum on-sky separation to match detections across different bands in arcsec
+maximum_match_separation = 10.0
+# number of negative examples (nearest non-dwarf neighbors) for each positive example (dwarf)
+negatives_per_positive = 20
 
 ### Multiprocessing constants
 NUM_CORES = psutil.cpu_count(logical=False)  # Number of physical cores
@@ -536,326 +543,153 @@ def make_cutouts_for_band(data_path, tile, cut_size, seg_mode):
     )
 
 
-def process_tile_old(
-    tile,
-    parent_dir,
-    in_dict,
-    band_names,
-    parent_dir_destination,
-    download_file,
-    cut_objects,
-    cutout_size,
-    seg_mode,
+def save_cutouts_to_h5(
+    tile, output_path, cutouts, segmaps, ras, decs, known_ids, labels, zspecs, band_names, seg_mode
 ):
     try:
-        all_band_data = {}
-        r_band_data = {}
-
-        tile_dir = f'{str(tile[0]).zfill(3)}_{str(tile[1]).zfill(3)}'
-        # set outpath
-        output_file = f'{tile_dir}_matched_cutouts.h5'
-        out_dir = os.path.join(parent_dir, tile_dir, 'gri')
-        os.makedirs(out_dir, exist_ok=True)
-        output_path = os.path.join(out_dir, output_file)
-
-        # skip if it already exists
-        if not os.path.isfile(output_path):
-            # Read data for all bands
-            for band in band_names:
-                zfill = in_dict[band]['zfill']
-                file_prefix = in_dict[band]['name']
-                delimiter = in_dict[band]['delimiter']
-                suffix = in_dict[band]['suffix']
-                num1, num2 = str(tile[0]).zfill(zfill), str(tile[1]).zfill(zfill)
-                cutout_prefix = f'{file_prefix}{delimiter}{num1}{delimiter}{num2}{suffix}'
-                cutout_suffix = '_cutouts.h5'
-                if cut_objects:
-                    cutout_suffix = '_cutouts_single.h5'
-                    data_path = os.path.join(
-                        parent_dir, tile_dir, band, cutout_prefix + '_rebin.fits'
-                    )
-                    make_cutouts_for_band(data_path, tile, cutout_size, seg_mode)
-                cutout_file = f'{cutout_prefix}{cutout_suffix}'
-                cutout_path = os.path.join(parent_dir, tile_dir, band, cutout_file)
-                cutout_dict = read_h5(cutout_path)
-
-                if band == 'cfis_lsb-r':
-                    r_band_data = cutout_dict.copy()
-                all_band_data[band] = {
-                    'cutouts': cutout_dict['images'],
-                    'ra': cutout_dict['ra'],
-                    'dec': cutout_dict['dec'],
-                }
-                if seg_mode == 'concatenate':
-                    all_band_data[band]['segmaps'] = cutout_dict['segmaps']
-
-            # Use r-band as reference
-            r_band = 'cfis_lsb-r'
-            r_band_coords = SkyCoord(
-                all_band_data[r_band]['ra'], all_band_data[r_band]['dec'], unit=u.deg
-            )
-
-            # Match cutouts for each non-r band to r-band
-            matched_indices = {r_band: np.arange(len(all_band_data[r_band]['ra']))}
-            for band in band_names:
-                if band != r_band:
-                    target_coords = SkyCoord(
-                        all_band_data[band]['ra'], all_band_data[band]['dec'], unit=u.deg
-                    )
-                    matched_r_indices, matched_target_indices = match_coordinates(
-                        r_band_coords, target_coords
-                    )
-                    matched_indices[band] = (matched_r_indices, matched_target_indices)
-
-            # Find common matches across all bands
-            common_r_indices = matched_indices[r_band]
-            for band in band_names:
-                if band != r_band:
-                    common_r_indices = np.intersect1d(common_r_indices, matched_indices[band][0])
-
-            # Update matched indices for all bands based on common matches
-            final_indices = {r_band: common_r_indices}
-            for band in band_names:
-                if band != r_band:
-                    mask = np.isin(matched_indices[band][0], common_r_indices)
-                    final_indices[band] = matched_indices[band][1][mask]
-
-            num_matched = len(common_r_indices)
-            logger.info(f'Tile {tile}: number of matched cutouts: {num_matched}')
-
-            # Create the final array with shape (num_cutouts, num_bands, cutout_size, cutout_size)
-            cutout_size = all_band_data[r_band]['cutouts'].shape[1:]
-            final_cutouts = np.zeros((num_matched, len(band_names), *cutout_size), dtype=np.float32)
-            final_segmaps = np.zeros((num_matched, len(band_names), *cutout_size), dtype=np.float32)
-
-            # Populate the final_cutouts array
-            for i, band in enumerate(band_names):
-                final_cutouts[:, i] = all_band_data[band]['cutouts'][final_indices[band]]
-                # Populate the final_segmaps array
-                if seg_mode == 'concatenate':
-                    final_segmaps[:, i] = all_band_data[band]['segmaps'][final_indices[band]]
-
-            # write fused cutouts to new h5 file
-            dt = h5py.special_dtype(vlen=str)
-            with h5py.File(output_path, 'w', libver='latest') as f:
-                # Store the matched cutouts
-                f.create_dataset('images', data=final_cutouts.astype(np.float32))
-                # Store r-band ra and dec
-                f.create_dataset('ra', data=all_band_data[r_band]['ra'][final_indices[r_band]])
-                f.create_dataset('dec', data=all_band_data[r_band]['dec'][final_indices[r_band]])
-                f.create_dataset('tile', data=r_band_data['tile'], dtype=np.int32)
-                f.create_dataset(
-                    'known_id', data=r_band_data['known_id'][final_indices[r_band]], dtype=dt
-                )
-                f.create_dataset('mto_id', data=r_band_data['mto_id'][final_indices[r_band]])
-                f.create_dataset('label', data=r_band_data['label'][final_indices[r_band]])
-                f.create_dataset('zspec', data=r_band_data['zspec'][final_indices[r_band]])
-                # Store band information
-                f.create_dataset('band_names', data=np.array(band_names, dtype='S'))
-                # Add stacked segmentation maps
-                if seg_mode == 'concatenate':
-                    f.create_dataset('segmaps', data=final_segmaps.astype(np.float32))
-
-            logger.debug(f'Created matched cutouts file: {output_path}')
-
-        if download_file:
-            name, ext = os.path.splitext(output_file)
-            # dir_destination = os.path.join(parent_dir_destination, tile_dir)
-            # os.makedirs(dir_destination, exist_ok=True)
-            temp_path = os.path.join(parent_dir_destination, name + '_temp' + ext)
-            final_path = os.path.join(parent_dir_destination, output_file)
-
-            if os.path.exists(final_path):
-                logger.info(f'File {output_file} was already downloaded. Skipping to next tile.')
-                return
-
-            logger.info(f'Downloading {output_file}...')
-
-            output_path = transform_path(output_path)
-            result = subprocess.run(
-                f'vcp -v {output_path} {temp_path}',
-                shell=True,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-
-            result.check_returncode()
-
-            os.rename(temp_path, final_path)
-
-            logger.info(f'Successfully downloaded {output_file} to {parent_dir_destination}.')
-        else:
-            return
-
+        dt = h5py.special_dtype(vlen=str)
+        with h5py.File(output_path, 'w', libver='latest') as f:
+            f.create_dataset('images', data=cutouts.astype(np.float32))
+            if seg_mode == 'concatenate':
+                f.create_dataset('segmaps', data=segmaps.astype(np.float32))
+            f.create_dataset('ra', data=ras.astype(np.float32))
+            f.create_dataset('dec', data=decs.astype(np.float32))
+            f.create_dataset('tile', data=np.asarray(tile), dtype=np.int32)
+            f.create_dataset('known_id', data=np.asarray(known_ids, dtype='S'), dtype=dt)
+            f.create_dataset('label', data=labels.astype(np.float32))
+            f.create_dataset('zspec', data=zspecs.astype(np.float32))
+            f.create_dataset('band_names', data=np.array(band_names, dtype='S'))
+        logger.debug(f'Created matched cutouts file: {output_path}')
     except Exception as e:
-        logger.error(f'Error processing tile {tile}: {e}', exc_info=True)
+        logger.error(f'Error saving to H5 file {output_path}: {e}', exc_info=True)
 
 
 def process_tile(
-    tile,
-    parent_dir,
-    in_dict,
-    band_names,
-    parent_dir_destination,
-    download_file,
-    cut_objects,
-    cut_size,
-    seg_mode,
+    tile, parent_dir, in_dict, band_names, cut_size, seg_mode, max_sep, n_neighbors=10
 ):
     try:
-        all_band_data = {}
-        r_band_data = {}
-
+        logger.debug(f'Matching and combining detections in tile {tile_str(tile)}')
         tile_dir = f'{str(tile[0]).zfill(3)}_{str(tile[1]).zfill(3)}'
-        # set outpath
         output_file = f'{tile_dir}_matched_cutouts.h5'
+        output_file_train = f'{tile_dir}_training_cutouts.h5'
         out_dir = os.path.join(parent_dir, tile_dir, 'gri')
         os.makedirs(out_dir, exist_ok=True)
         output_path = os.path.join(out_dir, output_file)
+        output_path_train = os.path.join(out_dir, output_file_train)
 
-        # Read data for all bands
+        # Read data and coordinates for all bands
+        band_data = {}
         for band in band_names:
-            zfill = in_dict[band]['zfill']
-            file_prefix = in_dict[band]['name']
-            delimiter = in_dict[band]['delimiter']
-            suffix = in_dict[band]['suffix']
-            num1, num2 = str(tile[0]).zfill(zfill), str(tile[1]).zfill(zfill)
-            cutout_prefix = f'{file_prefix}{delimiter}{num1}{delimiter}{num2}{suffix}'
-            cutout_suffix = '_cutouts.h5'
-            if cut_objects:
-                cutout_suffix = '_rebin_cutouts_single.h5'
-                data_path = os.path.join(parent_dir, tile_dir, band, cutout_prefix + '_rebin.fits')
-                make_cutouts_for_band(data_path, tile, cut_size, seg_mode)
-            cutout_file = f'{cutout_prefix}{cutout_suffix}'
-            cutout_path = os.path.join(parent_dir, tile_dir, band, cutout_file)
-            cutout_dict = read_h5(cutout_path)
-
-            if band == 'cfis_lsb-r':
-                r_band_data = cutout_dict.copy()
-            all_band_data[band] = {
-                'cutouts': cutout_dict['images'],
-                'ra': cutout_dict['ra'],
-                'dec': cutout_dict['dec'],
+            data, header, segmap, ra, dec, df = read_band_data(
+                parent_dir, tile_dir, tile, band, in_dict, seg_mode
+            )
+            band_data[band] = {
+                'data': data,
+                'header': header,
+                'segmap': segmap,
+                'df': df,
+                'ra': ra,
+                'dec': dec,
             }
-            if seg_mode == 'concatenate':
-                all_band_data[band]['segmaps'] = cutout_dict['segmaps']
+        try:
+            # Match objects across bands
+            multi_band_objects, object_indices, final_ras, final_decs, known_ids, labels, zspecs = (
+                match_coordinates_across_bands(band_data, max_sep, tile)
+            )
+        except Exception as e:
+            logger.error(f'Error in match_coordinates_across_bands: {e}.')
 
-        # Use r-band as reference
-        r_band = 'cfis_lsb-r'
-        r_band_coords = SkyCoord(
-            all_band_data[r_band]['ra'], all_band_data[r_band]['dec'], unit=u.deg
+        # Create cutouts for matched objects
+        num_objects = len(multi_band_objects)
+        logger.info(f'There are {num_objects} matched detections in tile {tile}.')
+        final_cutouts = np.zeros(
+            (num_objects, len(band_names), cut_size, cut_size), dtype=np.float32
+        )
+        final_segmaps = (
+            np.zeros((num_objects, len(band_names), cut_size, cut_size), dtype=np.float32)
+            if seg_mode is not None
+            else None
         )
 
-        # Match cutouts for each non-r band to r-band
-        matched_indices = {r_band: np.arange(len(all_band_data[r_band]['ra']))}
-        detection_count = np.ones(
-            len(matched_indices[r_band]), dtype=int
-        )  # Start with 1 for r-band
-        for band in band_names:
-            if band != r_band:
-                target_coords = SkyCoord(
-                    all_band_data[band]['ra'], all_band_data[band]['dec'], unit=u.deg
-                )
-                matched_r_indices, matched_target_indices = match_coordinates(
-                    r_band_coords, target_coords
-                )
-                matched_indices[band] = (matched_r_indices, matched_target_indices)
-                detection_count[matched_r_indices] += 1
-
-        # Find objects detected in r-band and at least one other band
-        common_r_indices = np.where(detection_count >= 2)[0]
-
-        # Update matched indices for all bands based on common matches
-        final_indices = {r_band: common_r_indices}
-        for band in band_names:
-            if band != r_band:
-                matched_r, matched_target = matched_indices[band]
-                mask = np.isin(matched_r, common_r_indices)
-                final_indices[band] = np.full(len(common_r_indices), -1, dtype=int)
-                final_indices[band][np.isin(common_r_indices, matched_r)] = matched_target[mask]
-
-        num_matched = len(common_r_indices)
-        logger.info(
-            f'Tile {tile}: number of objects detected in r-band and at least one other band: {num_matched}'
-        )
-
-        # Create the final array with shape (num_cutouts, num_bands, cutout_size, cutout_size)
-        cutout_size = all_band_data[r_band]['cutouts'].shape[1:]
-        final_cutouts = np.zeros((num_matched, len(band_names), *cutout_size), dtype=np.float32)
-        final_segmaps = np.zeros((num_matched, len(band_names), *cutout_size), dtype=np.float32)
-
-        # Populate the final_cutouts array
         for i, band in enumerate(band_names):
-            band_data = all_band_data[band]['cutouts']
-            band_indices = final_indices[band]
-            if band == r_band:
-                final_cutouts[:, i] = band_data[band_indices]
-            else:
-                mask = band_indices != -1
-                final_cutouts[mask, i] = band_data[band_indices[mask]]
+            data = band_data[band]['data']
+            header = band_data[band]['header']
+            segmap = band_data[band]['segmap']
 
-            # Populate the final_segmaps array
-            if seg_mode == 'concatenate':
-                band_segmaps = all_band_data[band]['segmaps']
-                if band == r_band:
-                    final_segmaps[:, i] = band_segmaps[band_indices]
-                else:
-                    final_segmaps[mask, i] = band_segmaps[band_indices[mask]]
-
-        # write fused cutouts to new h5 file
-        dt = h5py.special_dtype(vlen=str)
-        with h5py.File(output_path, 'w', libver='latest') as f:
-            # Store the matched cutouts
-            f.create_dataset('images', data=final_cutouts.astype(np.float32))
-            # Store r-band ra and dec
-            f.create_dataset('ra', data=all_band_data[r_band]['ra'][final_indices[r_band]])
-            f.create_dataset('dec', data=all_band_data[r_band]['dec'][final_indices[r_band]])
-            f.create_dataset('tile', data=r_band_data['tile'], dtype=np.int32)
-            f.create_dataset(
-                'known_id', data=r_band_data['known_id'][final_indices[r_band]], dtype=dt
-            )
-            f.create_dataset('mto_id', data=r_band_data['mto_id'][final_indices[r_band]])
-            f.create_dataset('label', data=r_band_data['label'][final_indices[r_band]])
-            f.create_dataset('zspec', data=r_band_data['zspec'][final_indices[r_band]])
-            # Store band information
-            f.create_dataset('band_names', data=np.array(band_names, dtype='S'))
-            # Add stacked segmentation maps
-            if seg_mode == 'concatenate':
-                f.create_dataset('segmaps', data=final_segmaps.astype(np.float32))
-
-        logger.debug(f'Created matched cutouts file: {output_path}')
-
-        if download_file:
-            name, ext = os.path.splitext(output_file)
-            # dir_destination = os.path.join(parent_dir_destination, tile_dir)
-            # os.makedirs(dir_destination, exist_ok=True)
-            temp_path = os.path.join(parent_dir_destination, name + '_temp' + ext)
-            final_path = os.path.join(parent_dir_destination, output_file)
-
-            if os.path.exists(final_path):
-                logger.info(f'File {output_file} was already downloaded. Skipping to next tile.')
-                return
-
-            logger.info(f'Downloading {output_file}...')
-
-            output_path = transform_path(output_path)
-            result = subprocess.run(
-                f'vcp -v {output_path} {temp_path}',
-                shell=True,
-                stderr=subprocess.PIPE,
-                text=True,
+            cutouts, cutouts_seg = make_cutouts(
+                data=data,
+                header=header,
+                tile_str=tile_str(tile),
+                ra=final_ras,
+                dec=final_decs,
+                segmap=segmap,
+                cutout_size=cutout_size,
+                seg_mode=seg_mode,
             )
 
-            result.check_returncode()
+            final_cutouts[:, i, :, :] = cutouts
+            if seg_mode is not None:
+                final_segmaps[:, i, :, :] = cutouts_seg
 
-            os.rename(temp_path, final_path)
+        save_cutouts_to_h5(
+            tile=tile,
+            output_path=output_path,
+            cutouts=final_cutouts,
+            segmaps=final_segmaps,
+            ras=final_ras,
+            decs=final_decs,
+            known_ids=known_ids,
+            labels=labels,
+            zspecs=zspecs,
+            band_names=band_names,
+            seg_mode=seg_mode,
+        )
 
-            logger.info(f'Successfully downloaded {output_file} to {parent_dir_destination}.')
+        # Process LSB objects
+        lsb_indices = np.where(labels == 1)[0]  # Assuming 1 indicates LSB objects
+        if len(lsb_indices) > 0:
+            logger.info(f'Found {len(lsb_indices)} LSB object(s) in tile {tile}.')
+
+            # Convert RA and Dec to Cartesian coordinates
+            coords = SkyCoord(ra=final_ras, dec=final_decs, unit='deg')
+            cartesian = coords.cartesian.xyz.value.T
+            # Find nearest neighbors for LSB objects
+            tree = cKDTree(cartesian)
+            _, neighbor_indices = tree.query(cartesian[lsb_indices], k=n_neighbors + 1)
+
+            # Flatten and remove duplicates
+            all_indices = np.unique(neighbor_indices.flatten())
+
+            # Create cutouts for LSB objects and their neighbors
+            train_cutouts = final_cutouts[all_indices]
+            train_segmaps = final_segmaps[all_indices] if final_segmaps is not None else None
+            train_ras = final_ras[all_indices]
+            train_decs = final_decs[all_indices]
+            train_known_ids = known_ids[all_indices]
+            train_labels = labels[all_indices]
+            train_zspecs = zspecs[all_indices]
+
+            # Save LSB cutouts
+            save_cutouts_to_h5(
+                tile=tile,
+                output_path=output_path_train,
+                cutouts=train_cutouts,
+                segmaps=train_segmaps,
+                ras=train_ras,
+                decs=train_decs,
+                known_ids=train_known_ids,
+                labels=train_labels,
+                zspecs=train_zspecs,
+                band_names=band_names,
+                seg_mode=seg_mode,
+            )
+            logger.info(
+                f'Saved {len(all_indices)} LSB objects and neighbors to {output_file_train}'
+            )
         else:
-            return
-
+            logger.debug(f'No LSB objects found in tile {tile}.')
     except Exception as e:
-        logger.error(f'Error processing tile {tile}: {e}', exc_info=True)
+        logger.error(f'An error occurred during cutout combination of tile {tile}: {e}')
 
 
 def fuse_cutouts_parallel(
@@ -869,6 +703,8 @@ def fuse_cutouts_parallel(
     cut_objects=False,
     cut_size=64,
     seg_mode='concatenate',
+    max_sep=15.0,
+    n_neighbors=10,
 ):
     logger.info(f'Starting to fuse cutouts for {len(tiles)} tiles in the bands: {band_names}')
 
@@ -882,11 +718,10 @@ def fuse_cutouts_parallel(
                 parent_dir,
                 in_dict,
                 band_names,
-                parent_dir_destination,
-                download_file,
-                cut_objects,
                 cut_size,
                 seg_mode,
+                max_sep,
+                n_neighbors,
             ): tile
             for tile in tiles
         }
@@ -930,6 +765,8 @@ def main(
     dwarf_cat,
     cut_objects,
     cut_size,
+    max_sep,
+    n_neighbors,
 ):
     try:
         # query availability of the tiles
@@ -965,8 +802,26 @@ def main(
                 )
             else:
                 tiles_to_process = availability.get_tiles_for_bands(bands_to_combine)
+
+            tiles_to_process = [
+                (np.int64(216), np.int64(306)),
+                (np.int64(220), np.int64(253)),
+                (np.int64(225), np.int64(270)),
+                (np.int64(232), np.int64(250)),
+                (np.int64(250), np.int64(269)),
+                (np.int64(314), np.int64(248)),
+                (np.int64(317), np.int64(280)),
+                (np.int64(323), np.int64(244)),
+                (np.int64(328), np.int64(244)),
+                (np.int64(375), np.int64(267)),
+                (np.int64(389), np.int64(269)),
+                (np.int64(391), np.int64(256)),
+                (np.int64(428), np.int64(249)),
+                (np.int64(439), np.int64(243)),
+                (np.int64(337), np.int64(243)),
+            ]
         except Exception as e:
-            print(f'There was an error getting the tile numbers: {e}.')
+            logger.error(f'There was an error getting the tile numbers: {e}.')
 
         # with open('tiles_gri.csv', 'w', newline='') as file:
         #     writer = csv.writer(file)
@@ -989,6 +844,8 @@ def main(
                 cut_objects=cut_objects,
                 cut_size=cut_size,
                 seg_mode=seg_mode,
+                max_sep=max_sep,
+                n_neighbors=n_neighbors,
             )
         if aggr_cutouts:
             combine_h5_files(download_dir, aggr_dir, objects_per_file=1000)
@@ -1063,6 +920,8 @@ if __name__ == '__main__':
         'dwarf_cat': dwarf_catalog,
         'cut_objects': cutout_objects,
         'cut_size': cutout_size,
+        'max_sep': maximum_match_separation,
+        'n_neighbors': negatives_per_positive,
     }
 
     start = time.time()
