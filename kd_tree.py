@@ -1,3 +1,5 @@
+import os
+
 import joblib
 import numpy as np
 from astropy.coordinates import SkyCoord
@@ -24,7 +26,7 @@ def build_tree(tiles, tile_info_dir, save=True):
     tile_coords_xyz = np.array([x.cartesian.xyz.value for x in tile_coords_c])  # type: ignore
     tree = cKDTree(tile_coords_xyz)
     if save:
-        joblib.dump(tree, tile_info_dir + 'kdtree_xyz.joblib')
+        joblib.dump(tree, os.path.join(tile_info_dir, 'kdtree_xyz.joblib'))
     pass
 
 

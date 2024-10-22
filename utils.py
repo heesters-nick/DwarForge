@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import time
+from collections import Counter
 from itertools import combinations
 
 import numpy as np
@@ -707,11 +708,13 @@ def is_mostly_zeros(file_path, fits_ext, band):
     # HSC data is compressed, decompress for faster read speed later
     if band in ['whigs-g', 'wishes-z']:
         data, header = decompress_fits(file_path)
+    elif band in ['ps-i']:
+        data, header = adjust_psdr3_header(file_path)
     else:
         data, header = open_fits(file_path, fits_ext)
 
     frac_zeros = np.count_nonzero(data == 0.0) / len(data.flatten())
-    if frac_zeros > 0.9:
+    if frac_zeros > 1.0:
         return True
     else:
         return False
@@ -785,3 +788,24 @@ def decompress_fits(file_path, fits_ext=1):
     new_hdu.writeto(file_path, overwrite=True)
 
     return data, header
+
+
+def count_duplicates(lst):
+    return sum(1 for count in Counter(lst).values() if count > 1)
+
+
+def adjust_psdr3_header(file_path):
+    data, header = open_fits(file_path, fits_ext=0)
+
+    new_header = header.copy()
+    # Update CRPIX values
+    new_header['CRPIX1'] += 0.5 * 0.25 / 0.186
+    new_header['CRPIX2'] += 0.5 * 0.25 / 0.186
+
+    # Create a new HDU with the rebinned data and updated header
+    new_hdu = fits.PrimaryHDU(data=data.astype(np.float32), header=new_header)
+
+    # save new fits file
+    new_hdu.writeto(file_path, overwrite=True)
+
+    return data, new_header

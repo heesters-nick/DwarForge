@@ -16,7 +16,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='dwarforge_r_dwarf_v3',
+    name='dwarforge_i_dr3',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -111,9 +111,9 @@ band_dictionary = {
         'zp': 30.0,
     },
     'ps-i': {
-        'name': 'PSS.DR4',
+        'name': 'PS-DR3',
         'band': 'i',
-        'vos': 'vos:cfis/panstarrs/DR4/resamp/',
+        'vos': 'vos:cfis/panstarrs/DR3/tiles/',
         'suffix': '.i.fits',
         'delimiter': '.',
         'fits_ext': 0,
@@ -159,7 +159,7 @@ show_plot = False
 # Save plot
 save_plot = True
 # define the band that should be used to detect objects
-anchor_band = 'cfis_lsb-r'
+anchor_band = 'ps-i'
 # process all available tiles
 process_all_available = False
 # process only tiles with known dwarfs
@@ -233,7 +233,7 @@ lens_catalog = os.path.join(table_directory, 'known_lenses.parquet')
 # define the path to the master catalog that accumulates information about the cut out objects
 catalog_master = os.path.join(table_directory, 'cutout_cat_master.parquet')
 # define the path to the catalog containing known dwarf galaxies
-dwarf_catalog = os.path.join(table_directory, 'all_known_dwarfs_v2_processed.csv')
+dwarf_catalog = os.path.join(table_directory, 'all_known_dwarfs_v3_processed.csv')
 # define path to file containing the processed h5 files
 processed_file = os.path.join(table_directory, 'processed.txt')
 # define catalog file

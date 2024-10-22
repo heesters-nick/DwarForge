@@ -4,6 +4,7 @@ import logging
 import multiprocessing
 import os  # noqa: E402
 import time
+import traceback
 import warnings  # noqa: E402
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import timedelta
@@ -19,7 +20,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='fuse_cutouts_test',
+    name='fuse_cutouts_dwarfs',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -98,9 +99,9 @@ band_dictionary = {
         'zp': 30.0,
     },
     'ps-i': {
-        'name': 'PSS.DR4',
+        'name': 'PS-DR3',
         'band': 'i',
-        'vos': 'vos:cfis/panstarrs/DR4/resamp/',
+        'vos': 'vos:cfis/panstarrs/DR3/tiles/',
         'suffix': '.i',
         'delimiter': '.',
         'fits_ext': 0,
@@ -218,7 +219,7 @@ lens_catalog = os.path.join(table_directory, 'known_lenses.parquet')
 # define the path to the master catalog that accumulates information about the cut out objects
 catalog_master = os.path.join(table_directory, 'cutout_cat_master.parquet')
 # define the path to the catalog containing known dwarf galaxies
-dwarf_catalog = os.path.join(table_directory, 'all_known_dwarfs_v2_processed.csv')
+dwarf_catalog = os.path.join(table_directory, 'all_known_dwarfs_v3_processed.csv')
 # define path to file containing the processed h5 files
 processed_file = os.path.join(table_directory, 'processed.txt')
 # define catalog file
@@ -580,9 +581,13 @@ def process_tile(
         # Read data and coordinates for all bands
         band_data = {}
         for band in band_names:
-            data, header, segmap, ra, dec, df = read_band_data(
-                parent_dir, tile_dir, tile, band, in_dict, seg_mode
-            )
+            try:
+                data, header, segmap, ra, dec, df = read_band_data(
+                    parent_dir, tile_dir, tile, band, in_dict, seg_mode
+                )
+            except Exception as e:
+                logger.error(f'Tile {tile}, error reading band data: {e}')
+                return
             band_data[band] = {
                 'data': data,
                 'header': header,
@@ -597,11 +602,18 @@ def process_tile(
                 match_coordinates_across_bands(band_data, max_sep, tile)
             )
         except Exception as e:
-            logger.error(f'Error in match_coordinates_across_bands: {e}.')
+            logger.error(f'Tile: {tile}: error in match_coordinates_across_bands: {e}.')
+            logger.error(f'Tile {tile}: Unhandled error in match_coordinates_across_bands: {e}')
+            logger.error(f'Tile {tile}: Error type: {type(e).__name__}')
+            logger.error(f'Tile {tile}: Error args: {e.args}')
+            logger.error(f'Tile {tile}: Traceback: {traceback.format_exc()}')
+            raise
 
         # Create cutouts for matched objects
         num_objects = len(multi_band_objects)
-        logger.info(f'There are {num_objects} matched detections in tile {tile}.')
+        if num_objects < n_neighbors:
+            logger.info(f'Tile {tile}: num matches is smaller than {n_neighbors}.')
+        logger.debug(f'There are {num_objects} matched detections in tile {tile}.')
         final_cutouts = np.zeros(
             (num_objects, len(band_names), cut_size, cut_size), dtype=np.float32
         )
@@ -648,14 +660,17 @@ def process_tile(
         # Process LSB objects
         lsb_indices = np.where(labels == 1)[0]  # Assuming 1 indicates LSB objects
         if len(lsb_indices) > 0:
-            logger.info(f'Found {len(lsb_indices)} LSB object(s) in tile {tile}.')
+            logger.debug(f'Found {len(lsb_indices)} LSB object(s) in tile {tile}.')
 
             # Convert RA and Dec to Cartesian coordinates
             coords = SkyCoord(ra=final_ras, dec=final_decs, unit='deg')
             cartesian = coords.cartesian.xyz.value.T
+            # Take minimum between n_neighbors+1 and the total number of matched objects to avoid errors
+            total_points = len(cartesian)
+            k = min(n_neighbors + 1, total_points)
             # Find nearest neighbors for LSB objects
             tree = cKDTree(cartesian)
-            _, neighbor_indices = tree.query(cartesian[lsb_indices], k=n_neighbors + 1)
+            _, neighbor_indices = tree.query(cartesian[lsb_indices], k=k)
 
             # Flatten and remove duplicates
             all_indices = np.unique(neighbor_indices.flatten())
@@ -683,13 +698,16 @@ def process_tile(
                 band_names=band_names,
                 seg_mode=seg_mode,
             )
-            logger.info(
+            logger.debug(
                 f'Saved {len(all_indices)} LSB objects and neighbors to {output_file_train}'
             )
         else:
             logger.debug(f'No LSB objects found in tile {tile}.')
+        return num_objects
     except Exception as e:
-        logger.error(f'An error occurred during cutout combination of tile {tile}: {e}')
+        logger.error(
+            f'An error occurred during cutout combination of tile {tile}, num matches: {num_objects}: {e}'
+        )
 
 
 def fuse_cutouts_parallel(
@@ -708,6 +726,7 @@ def fuse_cutouts_parallel(
 ):
     logger.info(f'Starting to fuse cutouts for {len(tiles)} tiles in the bands: {band_names}')
 
+    num_matches = []
     # Create a ProcessPoolExecutor
     with ProcessPoolExecutor(max_workers=num_processes) as executor:
         # Submit all tasks and create a dictionary to track futures
@@ -730,9 +749,18 @@ def fuse_cutouts_parallel(
         for future in tqdm(as_completed(future_to_tile), total=len(tiles)):
             tile = future_to_tile[future]
             try:
-                future.result()  # This will raise an exception if the task failed
+                result = future.result()  # This will raise an exception if the task failed
+                if result is not None:
+                    num_matches.append(result)
             except Exception as e:
                 logger.error(f'Error processing tile {tile}: {e}')
+
+    # Calculate and print the mean
+    if num_matches:
+        mean_matches = np.mean(num_matches)
+        logger.info(f'Mean matches across all processed tiles: {mean_matches}')
+    else:
+        logger.warning('No results were collected, unable to calculate mean.')
 
 
 def main(
@@ -803,23 +831,23 @@ def main(
             else:
                 tiles_to_process = availability.get_tiles_for_bands(bands_to_combine)
 
-            tiles_to_process = [
-                (np.int64(216), np.int64(306)),
-                (np.int64(220), np.int64(253)),
-                (np.int64(225), np.int64(270)),
-                (np.int64(232), np.int64(250)),
-                (np.int64(250), np.int64(269)),
-                (np.int64(314), np.int64(248)),
-                (np.int64(317), np.int64(280)),
-                (np.int64(323), np.int64(244)),
-                (np.int64(328), np.int64(244)),
-                (np.int64(375), np.int64(267)),
-                (np.int64(389), np.int64(269)),
-                (np.int64(391), np.int64(256)),
-                (np.int64(428), np.int64(249)),
-                (np.int64(439), np.int64(243)),
-                (np.int64(337), np.int64(243)),
-            ]
+            # tiles_to_process = [
+            #     (np.int64(216), np.int64(306)),
+            #     (np.int64(220), np.int64(253)),
+            #     (np.int64(225), np.int64(270)),
+            #     (np.int64(232), np.int64(250)),
+            #     (np.int64(250), np.int64(269)),
+            #     (np.int64(314), np.int64(248)),
+            #     (np.int64(317), np.int64(280)),
+            #     (np.int64(323), np.int64(244)),
+            #     (np.int64(328), np.int64(244)),
+            #     (np.int64(375), np.int64(267)),
+            #     (np.int64(389), np.int64(269)),
+            #     (np.int64(391), np.int64(256)),
+            #     (np.int64(428), np.int64(249)),
+            #     (np.int64(439), np.int64(243)),
+            #     (np.int64(337), np.int64(243)),
+            # ]
         except Exception as e:
             logger.error(f'There was an error getting the tile numbers: {e}.')
 
@@ -882,7 +910,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--processing_cores',
         type=int,
-        default=15,
+        default=16,
         help='Number of cores to use for processing (default: 15)',
     )
 

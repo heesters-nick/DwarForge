@@ -93,7 +93,9 @@ def get_unprocessed_jobs(
         #     (np.int64(175), np.int64(282)),
         # ]
 
-        # test_tiles = [(np.int64(243), np.int64(290)), (np.int64(276), np.int64(274))]
+        # test_tiles = [
+        #     (np.int64(250), np.int64(275)),
+        # ]
         if 'test_tiles' in locals() and test_tiles is not None and len(test_tiles) != 0:
             tiles_to_process = test_tiles
 
@@ -104,21 +106,22 @@ def get_unprocessed_jobs(
                 if process_band and not process_all_bands and band != process_band:
                     continue
 
-                # if only_known_dwarfs:
-                #     # If processing only known dwarfs, add all tiles regardless of database status
-                #     unprocessed.append((tile, band))
-                # else:
-                c.execute(
-                    """
-                    SELECT status
-                    FROM processed_tiles
-                    WHERE tile_id = ? AND band = ?
-                """,
-                    (str(tile), band),
-                )
-                result = c.fetchone()
-                if result is None or result[0] not in ['completed', 'skipped_mostly_zeros']:
+                if only_known_dwarfs:
+                    # If processing only known dwarfs, add all tiles regardless of database status
                     unprocessed.append((tile, band))
+                else:
+                    c.execute(
+                        """
+                        SELECT status
+                        FROM processed_tiles
+                        WHERE tile_id = ? AND band = ?
+                    """,
+                        (str(tile), band),
+                    )
+                    result = c.fetchone()
+                    if result is None or result[0] not in ['completed', 'skipped_mostly_zeros']:
+                        # if result is None or result[0] not in ['completed']:
+                        unprocessed.append((tile, band))
     finally:
         conn.close()
     return unprocessed

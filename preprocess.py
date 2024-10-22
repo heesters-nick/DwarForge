@@ -1036,6 +1036,7 @@ def prep_tile(tile, file_path, fits_ext, zp, band, bin_size=4):
         replace_anomaly=True,
         dilate_mask=True,
         save_to_file=False,
+        band=band,
     )
     logger.debug(f'{tile_str(tile)}: detected anomalies in {time.time()-start:.2f} seconds.')
     # estimate the background
