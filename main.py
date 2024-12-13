@@ -478,17 +478,22 @@ def download_worker(
             update_tile_info(database, tile_info, db_lock)
 
             try:
-                tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp = tile_band_specs(
-                    tile, in_dict, band, download_dir
-                )
+                specs = tile_band_specs(tile, in_dict, band, download_dir)
                 # delete folder contents from previous runs
-                delete_folder_contents(os.path.dirname(final_path))
+                delete_folder_contents(os.path.dirname(specs['final_path']))
                 # download the tile
                 success = download_tile_one_band(
-                    tile, tile_fitsfilename, final_path, temp_path, vos_path, band
+                    tile,
+                    specs['fitsfilename'],
+                    specs['final_path'],
+                    specs['temp_path'],
+                    specs['vos_path'],
+                    band,
                 )
                 if success:
-                    ready_queue.put((tile, band, final_path, fits_ext, zp))
+                    ready_queue.put(
+                        (tile, band, specs['final_path'], specs['fits_ext'], specs['zp'])
+                    )
                     tile_info['status'] = 'ready_for_processing'
                 else:
                     tile_info['status'] = 'download_failed'

@@ -96,7 +96,15 @@ def tile_band_specs(tile, in_dict, band, download_dir):
     temp_path = os.path.join(tile_band_dir, temp_name)
     final_path = os.path.join(tile_band_dir, tile_fitsfilename)
     vos_path = os.path.join(vos_dir, tile_fitsfilename)
-    return tile_fitsfilename, final_path, temp_path, vos_path, fits_ext, zp
+    return {
+        'fitsfilename': tile_fitsfilename,
+        'final_path': final_path,
+        'temp_path': temp_path,
+        'vos_path': vos_path,
+        'fits_ext': fits_ext,
+        'zp': zp,
+        'tile_dir': tile_dir,
+    }
 
 
 def download_tile_one_band(tile_numbers, tile_fitsname, final_path, temp_path, vos_path, band):

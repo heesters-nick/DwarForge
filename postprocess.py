@@ -19,6 +19,7 @@ from utils import (
     count_duplicates,
     create_cartesian_kdtree,
     open_fits,
+    open_raw_data,
     read_parquet,
     tile_str,
 )
@@ -788,16 +789,24 @@ def match_coordinates_across_bands(
     )
 
 
-def read_band_data(parent_dir, tile_dir, tile, band, in_dict, seg_mode):
+def read_band_data(parent_dir, tile_dir, tile, band, in_dict, seg_mode, use_full_res=False):
     # Read the full image, segmentation map, and catalog
     zfill = in_dict[band]['zfill']
     file_prefix = in_dict[band]['name']
     delimiter = in_dict[band]['delimiter']
     suffix = in_dict[band]['suffix']
+    fits_ext = in_dict[band]['fits_ext']
     num1, num2 = str(tile[0]).zfill(zfill), str(tile[1]).zfill(zfill)
     filename_prefix = f'{file_prefix}{delimiter}{num1}{delimiter}{num2}{suffix}'
-    data_path = os.path.join(parent_dir, tile_dir, band, filename_prefix + '_rebin.fits')
-    data, header = open_fits(data_path, fits_ext=0)
+    if use_full_res:
+        data_path = os.path.join(parent_dir, tile_dir, band, filename_prefix)
+        data, header = open_raw_data(data_path, fits_ext=fits_ext, band=band)
+    else:
+        data_path = os.path.join(
+            parent_dir, tile_dir, band, os.path.splitext(filename_prefix) + '_rebin.fits'
+        )
+        data, header = open_fits(data_path, fits_ext=0)
+
     path, extension = os.path.splitext(data_path)
 
     if seg_mode is not None:

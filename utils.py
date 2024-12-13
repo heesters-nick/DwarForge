@@ -268,7 +268,11 @@ def update_available_tiles(path, in_dict, save=True):
         start_fetch = time.time()
         try:
             logger.info(f'Retrieving {band_filter}-band tiles...')
-            band_tiles = Client().glob1(vos_dir, f'*{suffix}')
+            # avoid adding other recently added files that are in different format
+            if band == 'whigs-g':
+                band_tiles = Client().glob1(vos_dir, f'calexp*{suffix}.fits')
+            else:
+                band_tiles = Client().glob1(vos_dir, f'*{suffix}.fits')
             end_fetch = time.time()
             logger.info(
                 f'Retrieving {band_filter}-band tiles completed. Took {np.round((end_fetch-start_fetch)/60, 3)} minutes.'
@@ -809,3 +813,15 @@ def adjust_psdr3_header(file_path):
     new_hdu.writeto(file_path, overwrite=True)
 
     return data, new_header
+
+
+def open_raw_data(file_path, fits_ext, band):
+    # HSC data is compressed, decompress for faster read speed later
+    if band in ['whigs-g', 'wishes-z']:
+        data, header = decompress_fits(file_path)
+    elif band in ['ps-i']:
+        data, header = adjust_psdr3_header(file_path)
+    else:
+        data, header = open_fits(file_path, fits_ext)
+
+    return data, header

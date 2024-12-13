@@ -1,3 +1,4 @@
+import ast
 import ctypes
 import sqlite3
 import threading
@@ -6,6 +7,7 @@ from collections import deque
 from multiprocessing import Lock, Queue, Value
 
 import numpy as np
+import pandas as pd
 import psutil
 
 from logging_setup import get_logger
@@ -35,6 +37,27 @@ def init_db(database):
     conn.close()
 
 
+def init_cutouts_db(database):
+    """Initialize database for cutout processing."""
+    conn = sqlite3.connect(database)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS processed_cutouts
+                 (tile_id TEXT,
+                  band TEXT,
+                  start_time REAL,
+                  end_time REAL,
+                  status TEXT,
+                  error_message TEXT,
+                  cutout_count INTEGER,
+                  positive_count INTEGER,
+                  negative_count INTEGER,
+                  file_path TEXT,
+                  PRIMARY KEY (tile_id, band))""")
+    conn.commit()
+    conn.close()
+    logger.info('Database initialized.')
+
+
 @retry_on_db_locked()
 def get_unprocessed_jobs(
     database,
@@ -44,6 +67,9 @@ def get_unprocessed_jobs(
     process_band=None,
     process_all_bands=False,
     only_known_dwarfs=False,
+    process_type='tiles',
+    process_groups=False,
+    group_tiles=None,
 ):
     conn = sqlite3.connect(database)
 
@@ -53,7 +79,7 @@ def get_unprocessed_jobs(
         unprocessed = []
         if process_band:
             # Get tiles available in the specified band
-            tiles_to_process = tile_availability.band_tiles(process_band)
+            tiles_to_process = tile_availability.get_tiles_for_bands(process_band)
         else:
             tiles_to_process = tile_availability.unique_tiles
 
@@ -75,29 +101,41 @@ def get_unprocessed_jobs(
         #     (np.int64(267), np.int64(258)),
         # ]
         test_tiles = None
-        # test_tiles = [
-        #     (np.int64(45), np.int64(237)),
-        #     (np.int64(46), np.int64(237)),
-        #     (np.int64(46), np.int64(238)),
-        #     (np.int64(53), np.int64(338)),
-        #     (np.int64(80), np.int64(317)),
-        #     (np.int64(90), np.int64(325)),
-        #     (np.int64(93), np.int64(323)),
-        #     (np.int64(94), np.int64(331)),
-        #     (np.int64(95), np.int64(321)),
-        #     (np.int64(98), np.int64(320)),
-        #     (np.int64(118), np.int64(296)),
-        #     (np.int64(134), np.int64(295)),
-        #     (np.int64(153), np.int64(311)),
-        #     (np.int64(160), np.int64(324)),
-        #     (np.int64(175), np.int64(282)),
-        # ]
+        test_tiles = [
+            (np.int64(45), np.int64(237)),
+            (np.int64(46), np.int64(237)),
+            (np.int64(46), np.int64(238)),
+            (np.int64(53), np.int64(338)),
+            (np.int64(80), np.int64(317)),
+            (np.int64(90), np.int64(325)),
+            (np.int64(93), np.int64(323)),
+            (np.int64(94), np.int64(331)),
+            (np.int64(95), np.int64(321)),
+            (np.int64(98), np.int64(320)),
+            (np.int64(118), np.int64(296)),
+            (np.int64(134), np.int64(295)),
+            (np.int64(153), np.int64(311)),
+            (np.int64(160), np.int64(324)),
+            (np.int64(175), np.int64(282)),
+            (np.int64(250), np.int64(275)),
+            (np.int64(307), np.int64(247)),
+        ]
 
         # test_tiles = [
-        #     (np.int64(250), np.int64(275)),
+        # (np.int64(250), np.int64(275)),
+        # (np.int64(307), np.int64(247)),
+        # (np.int64(80), np.int64(317)),
         # ]
         if 'test_tiles' in locals() and test_tiles is not None and len(test_tiles) != 0:
+            # Filter test tiles, make sure they are available in the required bands
+            test_tiles = [tile for tile in test_tiles if tile in tiles_to_process]
             tiles_to_process = test_tiles
+
+        # Process only tiles near massive galaxies?
+        if process_groups:
+            group_tiles_df = pd.read_csv(group_tiles)
+            group_tile_nums = [ast.literal_eval(tile) for tile in group_tiles_df['tile'].values]
+            tiles_to_process = [tile for tile in tiles_to_process if tile in group_tile_nums]
 
         # print(test_tiles)
         for tile in tiles_to_process:
@@ -111,9 +149,9 @@ def get_unprocessed_jobs(
                     unprocessed.append((tile, band))
                 else:
                     c.execute(
-                        """
+                        f"""
                         SELECT status
-                        FROM processed_tiles
+                        FROM processed_{process_type}
                         WHERE tile_id = ? AND band = ?
                     """,
                         (str(tile), band),
@@ -167,8 +205,62 @@ def update_tile_info(database, tile_info, db_lock):
 
 
 @retry_on_db_locked()
+def update_cutout_info(database, cutout_info, db_lock):
+    """
+    Update the cutouts database with processing information.
+
+    Args:
+        database: Path to SQLite database
+        cutout_info: Dictionary containing info about the cutout processing
+        db_lock: Lock for database access
+    """
+    with db_lock:
+        conn = sqlite3.connect(database)
+
+        try:
+            c = conn.cursor()
+
+            # Base fields that are always included
+            fields = ['tile_id', 'band', 'status']
+            values = [str(cutout_info['tile']), cutout_info['band'], cutout_info['status']]
+
+            # Optional fields that might be present
+            for field in [
+                'start_time',
+                'end_time',
+                'error_message',
+                'cutout_count',
+                'positive_count',
+                'negative_count',
+                'file_path',
+            ]:
+                if field in cutout_info:
+                    fields.append(field)
+                    values.append(cutout_info[field])
+
+            placeholders = ', '.join(['?' for _ in fields])
+            fields_str = ', '.join(fields)
+
+            query = f"""
+                INSERT OR REPLACE INTO processed_cutouts
+                ({fields_str})
+                VALUES ({placeholders})
+            """
+
+            c.execute(query, values)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+@retry_on_db_locked()
 def get_progress_summary(
-    database, tile_availability, bands, unprocessed_jobs_at_start, processed_in_current_run
+    database,
+    tile_availability,
+    bands,
+    unprocessed_jobs_at_start,
+    processed_in_current_run,
+    process_type='tiles',
 ):
     conn = sqlite3.connect(database)
     results = {}
@@ -182,26 +274,38 @@ def get_progress_summary(
 
             # Get overall completed, failed, and in-progress counts
             c.execute(
-                """
+                f"""
                 SELECT
                     SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
                     SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as in_progress,
                     SUM(CASE WHEN status = 'download_failed' THEN 1 ELSE 0 END) as download_failed,
-                    SUM(CASE WHEN status = 'skipped_mostly_zeros' THEN 1 ELSE 0 END) as mostly_zeros
-                FROM processed_tiles
+                    SUM(CASE WHEN status = 'skipped_mostly_zeros' THEN 1 ELSE 0 END) as mostly_zeros,
+                    SUM(CASE WHEN status = 'downloading' THEN 1 ELSE 0 END) as downloading,
+                    SUM(CASE WHEN status = 'downloaded' THEN 1 ELSE 0 END) as downloaded
+                FROM processed_{process_type}
                 WHERE band = ?
             """,
                 (band,),
             )
 
             result = c.fetchone()
-            total_completed, total_failed, in_progress, download_failed, mostly_zeros = (
+            (
+                total_completed,
+                total_failed,
+                in_progress,
+                download_failed,
+                mostly_zeros,
+                downloading,
+                downloaded,
+            ) = (
                 result[0] or 0,
                 result[1] or 0,
                 result[2] or 0,
                 result[3] or 0,
                 result[4] or 0,
+                result[5] or 0,
+                result[6] or 0,
             )
 
             # Get processed count for the current run
@@ -219,6 +323,8 @@ def get_progress_summary(
                 'current_run_processed': current_run_processed,
                 'remaining_in_run': remaining_in_run,
                 'mostly_zeros': mostly_zeros,
+                'downloading': downloading,
+                'downloaded': downloaded,
             }
     finally:
         conn.close()
