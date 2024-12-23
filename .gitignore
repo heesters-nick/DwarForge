@@ -9,3 +9,6 @@ bkg_sub_rms_median.txt
 progress*
 tables/service_key_google_cloud.json
 databases/
+auth/
+cutouts/
+upload_checkpoints/

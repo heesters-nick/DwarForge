@@ -25,7 +25,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='full_res',
+    name='full_res_groups',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -176,17 +176,17 @@ print_per_tile_availability = False
 # how to treat the segmentation mask
 segmentation_mode = None  # 'concatenate', 'multiply', None
 # process only tiles with known dwarfs
-process_only_known_dwarfs = True
+process_only_known_dwarfs = False
 # cutout objects?
 cutout_objects = True
 # accumulate all lsb cutouts to a single file?
-accumulate_lsb_to_h5 = True
+accumulate_lsb_to_h5 = False
 # cutout size
 cutout_size = 256
 # use original resolution?
 use_full_resolution = True
 # process only group tiles?
-process_groups_only = False
+process_groups_only = True
 # maximum on-sky separation to match detections across different bands in arcsec
 maximum_match_separation = 10.0
 # number of negative examples (nearest non-dwarf neighbors) for each positive example (dwarf)
@@ -737,7 +737,7 @@ def process_tile(
                     parent_dir, tile_dir, tile, band, in_dict, seg_mode, use_full_res
                 )
             except Exception as e:
-                logger.error(f'Tile {tile}, error reading band data: {e}')
+                logger.error(f'Tile {tile}, band: {band}, error reading band data: {e}')
                 return
             band_data[band] = {
                 'data': data,
@@ -1168,6 +1168,8 @@ def main(
                 if accumulate_lsb:
                     lsb_h5_lock = manager.Lock()
                     initialize_lsb_file(lsb_h5_path, bands_to_combine, cut_size)
+                else:
+                    lsb_h5_lock = None
 
                 # dictionary to keep track of processed tiles per band in current run
                 processed_in_current_run = manager.dict({band: 0 for band in band_dict.keys()})

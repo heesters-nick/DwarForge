@@ -101,30 +101,42 @@ def get_unprocessed_jobs(
         #     (np.int64(267), np.int64(258)),
         # ]
         test_tiles = None
-        test_tiles = [
-            (np.int64(45), np.int64(237)),
-            (np.int64(46), np.int64(237)),
-            (np.int64(46), np.int64(238)),
-            (np.int64(53), np.int64(338)),
-            (np.int64(80), np.int64(317)),
-            (np.int64(90), np.int64(325)),
-            (np.int64(93), np.int64(323)),
-            (np.int64(94), np.int64(331)),
-            (np.int64(95), np.int64(321)),
-            (np.int64(98), np.int64(320)),
-            (np.int64(118), np.int64(296)),
-            (np.int64(134), np.int64(295)),
-            (np.int64(153), np.int64(311)),
-            (np.int64(160), np.int64(324)),
-            (np.int64(175), np.int64(282)),
-            (np.int64(250), np.int64(275)),
-            (np.int64(307), np.int64(247)),
-        ]
+        # test_tiles = [
+        #     (np.int64(45), np.int64(237)),
+        #     (np.int64(46), np.int64(237)),
+        #     (np.int64(46), np.int64(238)),
+        #     (np.int64(53), np.int64(338)),
+        #     (np.int64(80), np.int64(317)),
+        #     (np.int64(90), np.int64(325)),
+        #     (np.int64(93), np.int64(323)),
+        #     (np.int64(94), np.int64(331)),
+        #     (np.int64(95), np.int64(321)),
+        #     (np.int64(98), np.int64(320)),
+        #     (np.int64(118), np.int64(296)),
+        #     (np.int64(134), np.int64(295)),
+        #     (np.int64(153), np.int64(311)),
+        #     (np.int64(160), np.int64(324)),
+        #     (np.int64(175), np.int64(282)),
+        #     (np.int64(250), np.int64(275)),
+        #     (np.int64(307), np.int64(247)),
+        # ]
 
         # test_tiles = [
-        # (np.int64(250), np.int64(275)),
-        # (np.int64(307), np.int64(247)),
-        # (np.int64(80), np.int64(317)),
+        #     (np.int64(80), np.int64(317)),
+        #     (np.int64(77), np.int64(326)),
+        #     (np.int64(79), np.int64(317)),
+        #     (np.int64(79), np.int64(330)),
+        #     (np.int64(79), np.int64(339)),
+        #     (np.int64(80), np.int64(337)),
+        #     (np.int64(82), np.int64(316)),
+        #     (np.int64(82), np.int64(334)),
+        #     (np.int64(82), np.int64(336)),
+        #     (np.int64(83), np.int64(338)),
+        #     (np.int64(84), np.int64(334)),
+        #     (np.int64(99), np.int64(318)),
+        #     (np.int64(229), np.int64(291)),
+        #     (np.int64(243), np.int64(290)),
+        #     (np.int64(276), np.int64(274)),
         # ]
         if 'test_tiles' in locals() and test_tiles is not None and len(test_tiles) != 0:
             # Filter test tiles, make sure they are available in the required bands
@@ -146,7 +158,19 @@ def get_unprocessed_jobs(
 
                 if only_known_dwarfs:
                     # If processing only known dwarfs, add all tiles regardless of database status
-                    unprocessed.append((tile, band))
+                    # unprocessed.append((tile, band))
+                    c.execute(
+                        f"""
+                        SELECT status
+                        FROM processed_{process_type}
+                        WHERE tile_id = ? AND band = ?
+                    """,
+                        (str(tile), band),
+                    )
+                    result = c.fetchone()
+                    if result is None or result[0] not in ['completed', 'skipped_mostly_zeros']:
+                        # if result is None or result[0] not in ['completed']:
+                        unprocessed.append((tile, band))
                 else:
                     c.execute(
                         f"""
