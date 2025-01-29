@@ -205,7 +205,7 @@ class DriveUploader:
 
         total_size = sum(os.path.getsize(f) for f in files_to_process)
         logger.info(
-            f'Found {len(files_to_process)} files to process (Total: {total_size/1e9:.2f} GB)'
+            f'Found {len(files_to_process)} files to process (Total: {total_size / 1e9:.2f} GB)'
         )
 
         results = []
@@ -225,8 +225,8 @@ class DriveUploader:
 
                 if result['status'] in ['uploaded', 'updated']:
                     logger.info(
-                        f"{result['status'].capitalize()}: {result['file_path']} -> "
-                        f"https://drive.google.com/file/d/{result['file_id']}/view"
+                        f'{result["status"].capitalize()}: {result["file_path"]} -> '
+                        f'https://drive.google.com/file/d/{result["file_id"]}/view'
                     )
 
         # Summary
@@ -236,7 +236,7 @@ class DriveUploader:
         failed = sum(1 for r in results if r['status'] == 'failed')
 
         logger.info('\nOperation Summary:')
-        logger.info(f'Total time: {(time.time() - start_time)/60:.2f} minutes')
+        logger.info(f'Total time: {(time.time() - start_time) / 60:.2f} minutes')
         logger.info(f'New uploads: {uploaded}')
         logger.info(f'Updated files: {updated}')
         logger.info(f'Skipped (unchanged): {skipped}')
@@ -246,7 +246,7 @@ class DriveUploader:
             logger.info('\nFailed files:')
             for result in results:
                 if result['status'] == 'failed':
-                    logger.info(f"{result['file_path']}: {result['error']}")
+                    logger.info(f'{result["file_path"]}: {result["error"]}')
 
         return results
 

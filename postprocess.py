@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import pandas as pd
 from astropy import units as u
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, search_around_sky
 from astropy.wcs import WCS
 
 from logging_setup import get_logger
@@ -260,14 +260,14 @@ def add_labels(
                 # det_df_updated = pd.concat([det_df_updated, new_rows], ignore_index=True)
 
                 warning_msg = (
-                    f"{len(new_rows)} known dwarf(s) that was/were initially filtered out in\n\t"
-                    f"tile: {tile_str(tile)}\n\t"
-                    f"band: {band}:\n\t"
-                    f"ID: {new_rows['ID_known'].values}\n\t"
-                    f"mu: {[f'{mu:.3f}' for mu in new_rows['mu'].values]}\n\t"
-                    f"r_eff: {[f'{re:.3f}' for re in new_rows['re_arcsec'].values]}\n\t"
-                    f"ra: {new_rows['ra'].values}\n\t"
-                    f"dec: {new_rows['dec'].values}\t"
+                    f'{len(new_rows)} known dwarf(s) that was/were initially filtered out in\n\t'
+                    f'tile: {tile_str(tile)}\n\t'
+                    f'band: {band}:\n\t'
+                    f'ID: {new_rows["ID_known"].values}\n\t'
+                    f'mu: {[f"{mu:.3f}" for mu in new_rows["mu"].values]}\n\t'
+                    f'r_eff: {[f"{re:.3f}" for re in new_rows["re_arcsec"].values]}\n\t'
+                    f'ra: {new_rows["ra"].values}\n\t'
+                    f'dec: {new_rows["dec"].values}\t'
                 )
                 logger.warning(warning_msg)
                 warnings.append(warning_msg)
@@ -278,12 +278,12 @@ def add_labels(
 
             if len(full_lsb_unmatches) > 0:
                 warning_msg = (
-                    f"Found {len(full_lsb_unmatches)} undetected but known dwarfs in\n\t"
-                    f"tile: {tile_str(tile)}\n\t"
-                    f"band: {band}\n\t"
-                    f"ID(s): {full_lsb_unmatches['ID'].values}\n\t"
-                    f"ra: {full_lsb_unmatches['ra'].values}\n\t"
-                    f"dec: {full_lsb_unmatches['dec'].values}\n\t"
+                    f'Found {len(full_lsb_unmatches)} undetected but known dwarfs in\n\t'
+                    f'tile: {tile_str(tile)}\n\t'
+                    f'band: {band}\n\t'
+                    f'ID(s): {full_lsb_unmatches["ID"].values}\n\t'
+                    f'ra: {full_lsb_unmatches["ra"].values}\n\t'
+                    f'dec: {full_lsb_unmatches["dec"].values}\n\t'
                 )
                 logger.warning(warning_msg)
                 warnings.append(warning_msg)
@@ -418,7 +418,7 @@ def make_cutouts(
     cutouts, cutouts_seg = create_segmented_cutouts(
         data, tile_str, segmap, object_ids, xs, ys, cutout_size, seg_mode
     )
-    logger.debug(f'{tile_str}: cutouts done in {time.time()-cutout_start:.2f} seconds.')
+    logger.debug(f'{tile_str}: cutouts done in {time.time() - cutout_start:.2f} seconds.')
 
     return cutouts, cutouts_seg
 
@@ -596,7 +596,7 @@ def match_coordinates_across_bands_old(
             for idx in df.index[lsb_mask]:
                 if object_id_map[band][idx] not in object_to_unique[band]:
                     logger.warning(
-                        f"tile: {tile}, dwarf {df.loc[idx, 'ID_known']} was only detected in {band}."
+                        f'tile: {tile}, dwarf {df.loc[idx, "ID_known"]} was only detected in {band}.'
                     )
                     single_band_lsbs.append(df.loc[idx, 'ID_known'])
                     unique_id = unique_id_counter
@@ -604,9 +604,9 @@ def match_coordinates_across_bands_old(
                     unique_objects[unique_id] = {(band, idx)}
                     object_to_unique[band][object_id_map[band][idx]] = unique_id
                     # Ensure the unique_id is valid
-                    assert (
-                        unique_id in unique_objects
-                    ), f'Inconsistency created for unique_id {unique_id}'
+                    assert unique_id in unique_objects, (
+                        f'Inconsistency created for unique_id {unique_id}'
+                    )
 
     # count duplicates in single_band detections (cross-match failed due to incompatible coordinates)
     duplicates = count_duplicates(single_band_lsbs)
@@ -663,127 +663,287 @@ def match_coordinates_across_bands_old(
     )
 
 
-def match_coordinates_across_bands(
-    band_data: Dict[str, Dict], max_sep: float, tile: tuple
-) -> Tuple[
-    np.ndarray, Dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
-]:
-    # Filter out empty bands
-    band_names = [band for band in band_data.keys() if band_data[band]['ra'].size > 0]
+# def match_coordinates_across_bands(
+#     band_data: Dict[str, Dict], max_sep: float, tile: tuple
+# ) -> Tuple[
+#     np.ndarray, Dict[str, np.ndarray], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+# ]:
+#     # Filter out empty bands
+#     band_names = [band for band in band_data.keys() if band_data[band]['ra'].size > 0]
 
-    # If we have fewer than 2 bands with data, return empty results
-    if len(band_names) < 1:
-        empty_result = np.array([], dtype=int)
-        empty_indices = {band: np.array([], dtype=int) for band in band_data.keys()}
-        return (
-            empty_result,
-            empty_indices,
-            empty_result,
-            empty_result,
-            empty_result,
-            empty_result,
-            empty_result,
+#     # If we have fewer than 2 bands with data, return empty results
+#     if len(band_names) < 1:
+#         empty_result = np.array([], dtype=int)
+#         empty_indices = {band: np.array([], dtype=int) for band in band_data.keys()}
+#         return (
+#             empty_result,
+#             empty_indices,
+#             empty_result,
+#             empty_result,
+#             empty_result,
+#             empty_result,
+#             empty_result,
+#         )
+
+#     all_matches = {}
+
+#     # Only try to match bands that have data
+#     for band1, band2 in combinations(band_names, 2):
+#         idx1, idx2 = match_coordinates(band1, band2, band_data, max_sep=max_sep)
+#         all_matches[f'{band1}|{band2}'] = np.column_stack((idx1, idx2))
+
+#     # Use the maximum length of non-empty bands
+#     num_objects = max(len(band_data[band]['ra']) for band in band_names)
+
+#     # Create object ID maps only for non-empty bands
+#     object_id_map = {band: np.arange(len(band_data[band]['ra'])) for band in band_names}
+
+#     # Initialize tracking for all bands, even empty ones
+#     object_to_unique = {band: {} for band in band_data.keys()}
+#     unique_objects = {}
+#     unique_id_counter = 0
+
+#     # Process matches for non-empty bands
+#     for match_key, matches in all_matches.items():
+#         band1, band2 = match_key.split('|')
+#         for idx1, idx2 in matches:
+#             obj1 = object_id_map[band1][idx1]
+#             obj2 = object_id_map[band2][idx2]
+
+#             if obj1 in object_to_unique[band1] and obj2 in object_to_unique[band2]:
+#                 unique_id1 = object_to_unique[band1][obj1]
+#                 unique_id2 = object_to_unique[band2][obj2]
+#                 if unique_id1 != unique_id2:
+#                     unique_objects[unique_id1].update(unique_objects[unique_id2])
+#                     for b, idx in unique_objects[unique_id2]:
+#                         object_to_unique[b][object_id_map[b][idx]] = unique_id1
+#                     del unique_objects[unique_id2]
+#             elif obj1 in object_to_unique[band1]:
+#                 unique_id = object_to_unique[band1][obj1]
+#                 unique_objects[unique_id].add((band2, idx2))
+#                 object_to_unique[band2][obj2] = unique_id
+#             elif obj2 in object_to_unique[band2]:
+#                 unique_id = object_to_unique[band2][obj2]
+#                 unique_objects[unique_id].add((band1, idx1))
+#                 object_to_unique[band1][obj1] = unique_id
+#             else:
+#                 unique_id = unique_id_counter
+#                 unique_id_counter += 1
+#                 unique_objects[unique_id] = {(band1, idx1), (band2, idx2)}
+#                 object_to_unique[band1][obj1] = unique_id
+#                 object_to_unique[band2][obj2] = unique_id
+
+#     # Initialize object_indices for all bands, even empty ones
+#     object_indices = {
+#         band: np.full(num_objects if band in band_names else 0, -1, dtype=int)
+#         for band in band_data.keys()
+#     }
+
+#     # Process unique objects as before
+#     multi_band_objects = []
+#     final_ra = []
+#     final_dec = []
+#     known_ids = []
+#     labels = []
+#     zspecs = []
+
+#     for unique_id, detections in unique_objects.items():
+#         if len(detections) >= 2 or any(
+#             band_data[band]['df'].loc[idx, 'lsb'] == 1 for band, idx in detections
+#         ):
+#             multi_band_objects.append(unique_id)
+#             first_band, first_idx = next(iter(detections))
+
+#             for band, idx in detections:
+#                 object_indices[band][idx] = unique_id
+
+#             final_ra.append(band_data[first_band]['ra'][first_idx])
+#             final_dec.append(band_data[first_band]['dec'][first_idx])
+#             known_ids.append(
+#                 band_data[first_band]['df'].loc[first_idx, 'ID_known']
+#                 if 'ID_known' in band_data[first_band]['df'].columns
+#                 else ''
+#             )
+#             labels.append(
+#                 band_data[first_band]['df'].loc[first_idx, 'lsb']
+#                 if 'lsb' in band_data[first_band]['df'].columns
+#                 else np.nan
+#             )
+#             zspecs.append(
+#                 band_data[first_band]['df'].loc[first_idx, 'zspec']
+#                 if 'zspec' in band_data[first_band]['df'].columns
+#                 else np.nan
+#             )
+
+#     return (
+#         np.array(multi_band_objects),
+#         object_indices,
+#         np.array(final_ra),
+#         np.array(final_dec),
+#         np.array(known_ids),
+#         np.array(labels),
+#         np.array(zspecs),
+#     )
+
+
+def match_coordinates_across_bands(
+    band_data: dict,
+    max_sep: float = 10.0,
+    band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i'],  # Configure band priority order
+) -> pd.DataFrame:
+    """
+    Cross-match detections across bands, preserving per-band parameters.
+    Uses coordinates from highest-priority band with detection.
+
+    Args:
+        band_data: Dictionary with band names as keys and values containing:
+                   - 'ra': Array of RA values
+                   - 'dec': Array of Dec values
+                   - 'df': DataFrame with photometric parameters
+        max_sep: Maximum matching separation in arcseconds
+        band_priority: Order of preference for choosing coordinates
+
+    Returns:
+        Merged DataFrame with per-band parameters and coordinates from primary band
+    """
+    # Combine all detections into a single coordinate list
+    coords, bands_list, indices, dfs = [], [], [], []
+    for band in band_priority:  # Process bands in priority order
+        if band not in band_data:
+            continue
+        data = band_data[band]
+        if len(data['ra']) == 0:
+            continue
+        coords.append(SkyCoord(ra=data['ra'] * u.deg, dec=data['dec'] * u.deg))
+        bands_list.extend([band] * len(data['ra']))
+        indices.append(np.arange(len(data['ra'])))
+        dfs.append(data['df'])
+
+    if len(coords) < 2:
+        return pd.DataFrame()
+
+    # Perform global coordinate matching (cross-band only)
+    all_coords = SkyCoord.concatenate(coords)
+    idx1, idx2, _, _ = search_around_sky(all_coords, all_coords, max_sep * u.arcsec)
+
+    # Filter out same-band matches and duplicates
+    same_band_mask = np.array([bands_list[i] == bands_list[j] for i, j in zip(idx1, idx2)])
+    pair_mask = (idx1 < idx2) & (~same_band_mask)
+    idx1, idx2 = idx1[pair_mask], idx2[pair_mask]
+
+    # Union-Find to group connected detections
+    parent = np.arange(len(all_coords))
+
+    def find(u):
+        while parent[u] != u:
+            parent[u] = parent[parent[u]]  # Path compression
+            u = parent[u]
+        return u
+
+    for i, j in zip(idx1, idx2):
+        root_i, root_j = find(i), find(j)
+        if root_i != root_j:
+            parent[root_j] = root_i
+
+    # Extract groups with ≥2 bands, ensuring one detection per band
+    groups = {}
+    for idx in range(len(all_coords)):
+        root = find(idx)
+        groups.setdefault(root, set()).add(idx)
+
+    # Process groups and enforce one detection per band
+    processed_groups = []
+    for group in groups.values():
+        band_detections = {}
+        for idx in group:
+            band = bands_list[idx]
+            if band not in band_detections:
+                band_detections[band] = idx
+        if len(band_detections) >= 2:
+            processed_groups.append(band_detections)
+
+    # Define all possible columns
+    band_specific_cols = [
+        'ID',
+        'X',
+        'Y',
+        'A',
+        'B',
+        'theta',
+        'total_flux',
+        'mu_max',
+        'mu_median',
+        'mu_mean',
+        'R_fwhm',
+        'R_e',
+        'R10',
+        'R25',
+        'R75',
+        'R90',
+        'R100',
+        'n_pix',
+        'ra',
+        'dec',
+        're_arcsec',
+        'r_fwhm_arcsec',
+        'r_10_arcsec',
+        'r_25_arcsec',
+        'r_75_arcsec',
+        'r_90_arcsec',
+        'r_100_arcsec',
+        'A_arcsec',
+        'B_arcsec',
+        'axis_ratio',
+        'mag',
+        'mu',
+    ]
+    common_cols = ['class_label', 'zspec', 'lsb', 'ID_known']
+
+    # Create template DataFrame with all possible columns
+    columns = ['ra', 'dec'] + common_cols
+    for band in band_priority:
+        columns += [f'{col}_{band}' for col in band_specific_cols]
+    result_df = pd.DataFrame(columns=columns)
+
+    # Populate rows
+    for group in processed_groups:
+        # Determine primary band for coordinates
+        primary_band = next((b for b in band_priority if b in group), None)
+        if not primary_band:
+            continue
+
+        # Get primary detection details
+        primary_idx = group[primary_band]
+        band_idx = band_priority.index(primary_band)
+        df_offset = sum(len(d) for d in dfs[:band_idx])
+        orig_idx = indices[band_idx][primary_idx - df_offset]
+        primary_df = dfs[band_idx].iloc[orig_idx]
+
+        # Initialize row with NaNs
+        row = {col: np.nan for col in columns}
+        row.update(
+            {
+                'ra': primary_df['ra'],
+                'dec': primary_df['dec'],
+                **{col: primary_df.get(col, np.nan) for col in common_cols},
+            }
         )
 
-    all_matches = {}
+        # Fill band-specific columns
+        for band, idx in group.items():
+            band_idx = band_priority.index(band)
+            df_offset = sum(len(d) for d in dfs[:band_idx])
+            orig_idx = indices[band_idx][idx - df_offset]
+            band_df = dfs[band_idx].iloc[orig_idx]
 
-    # Only try to match bands that have data
-    for band1, band2 in combinations(band_names, 2):
-        idx1, idx2 = match_coordinates(band1, band2, band_data, max_sep=max_sep)
-        all_matches[f'{band1}|{band2}'] = np.column_stack((idx1, idx2))
+            for col in band_specific_cols:
+                row[f'{col}_{band}'] = band_df.get(col, np.nan)
 
-    # Use the maximum length of non-empty bands
-    num_objects = max(len(band_data[band]['ra']) for band in band_names)
+        result_df = pd.concat([result_df, pd.DataFrame([row])], ignore_index=True)
 
-    # Create object ID maps only for non-empty bands
-    object_id_map = {band: np.arange(len(band_data[band]['ra'])) for band in band_names}
+    result_df.insert(loc=0, column='unique_id', value=np.arange(len(result_df)))
 
-    # Initialize tracking for all bands, even empty ones
-    object_to_unique = {band: {} for band in band_data.keys()}
-    unique_objects = {}
-    unique_id_counter = 0
-
-    # Process matches for non-empty bands
-    for match_key, matches in all_matches.items():
-        band1, band2 = match_key.split('|')
-        for idx1, idx2 in matches:
-            obj1 = object_id_map[band1][idx1]
-            obj2 = object_id_map[band2][idx2]
-
-            if obj1 in object_to_unique[band1] and obj2 in object_to_unique[band2]:
-                unique_id1 = object_to_unique[band1][obj1]
-                unique_id2 = object_to_unique[band2][obj2]
-                if unique_id1 != unique_id2:
-                    unique_objects[unique_id1].update(unique_objects[unique_id2])
-                    for b, idx in unique_objects[unique_id2]:
-                        object_to_unique[b][object_id_map[b][idx]] = unique_id1
-                    del unique_objects[unique_id2]
-            elif obj1 in object_to_unique[band1]:
-                unique_id = object_to_unique[band1][obj1]
-                unique_objects[unique_id].add((band2, idx2))
-                object_to_unique[band2][obj2] = unique_id
-            elif obj2 in object_to_unique[band2]:
-                unique_id = object_to_unique[band2][obj2]
-                unique_objects[unique_id].add((band1, idx1))
-                object_to_unique[band1][obj1] = unique_id
-            else:
-                unique_id = unique_id_counter
-                unique_id_counter += 1
-                unique_objects[unique_id] = {(band1, idx1), (band2, idx2)}
-                object_to_unique[band1][obj1] = unique_id
-                object_to_unique[band2][obj2] = unique_id
-
-    # Initialize object_indices for all bands, even empty ones
-    object_indices = {
-        band: np.full(num_objects if band in band_names else 0, -1, dtype=int)
-        for band in band_data.keys()
-    }
-
-    # Process unique objects as before
-    multi_band_objects = []
-    final_ra = []
-    final_dec = []
-    known_ids = []
-    labels = []
-    zspecs = []
-
-    for unique_id, detections in unique_objects.items():
-        if len(detections) >= 2 or any(
-            band_data[band]['df'].loc[idx, 'lsb'] == 1 for band, idx in detections
-        ):
-            multi_band_objects.append(unique_id)
-            first_band, first_idx = next(iter(detections))
-
-            for band, idx in detections:
-                object_indices[band][idx] = unique_id
-
-            final_ra.append(band_data[first_band]['ra'][first_idx])
-            final_dec.append(band_data[first_band]['dec'][first_idx])
-            known_ids.append(
-                band_data[first_band]['df'].loc[first_idx, 'ID_known']
-                if 'ID_known' in band_data[first_band]['df'].columns
-                else ''
-            )
-            labels.append(
-                band_data[first_band]['df'].loc[first_idx, 'lsb']
-                if 'lsb' in band_data[first_band]['df'].columns
-                else np.nan
-            )
-            zspecs.append(
-                band_data[first_band]['df'].loc[first_idx, 'zspec']
-                if 'zspec' in band_data[first_band]['df'].columns
-                else np.nan
-            )
-
-    return (
-        np.array(multi_band_objects),
-        object_indices,
-        np.array(final_ra),
-        np.array(final_dec),
-        np.array(known_ids),
-        np.array(labels),
-        np.array(zspecs),
-    )
+    return result_df
 
 
 def read_band_data(parent_dir, tile_dir, tile, band, in_dict, seg_mode, use_full_res=False):
@@ -828,6 +988,7 @@ def read_band_data(parent_dir, tile_dir, tile, band, in_dict, seg_mode, use_full
         det_df_dwarf = det_df[det_df['lsb'] == 1].reset_index(drop=True)
         det_df = filter_candidates(df=det_df_other, tile=tile, band=band)
         det_df = pd.concat([det_df, det_df_dwarf], ignore_index=True)
+        det_df = det_df.sort_values('ID')  # keep original order
 
     return data, header, segmap, det_df['ra'].values, det_df['dec'].values, det_df
 
@@ -951,10 +1112,10 @@ def filter_candidates(df, tile, band):
 
     if 'lsb' in df.columns:
         logger.debug(
-            f'{tile}, {band}: filtered out {len(df.loc[df["lsb"]==1])-len(df_mod.loc[df_mod["lsb"]==1])}/{len(df_dwarf)} dwarfs.'
+            f'{tile}, {band}: filtered out {len(df.loc[df["lsb"] == 1]) - len(df_mod.loc[df_mod["lsb"] == 1])}/{len(df_dwarf)} dwarfs.'
         )
         logger.debug(
-            f'{tile}, {band}: filtered out {len(df.loc[df["lsb"].isna()])-len(df_mod.loc[df_mod["lsb"].isna()])}/{len(df.loc[df["lsb"].isna()])} other objects.'
+            f'{tile}, {band}: filtered out {len(df.loc[df["lsb"].isna()]) - len(df_mod.loc[df_mod["lsb"].isna()])}/{len(df.loc[df["lsb"].isna()])} other objects.'
         )
 
     return df_mod

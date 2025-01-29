@@ -121,23 +121,23 @@ def get_unprocessed_jobs(
         #     (np.int64(307), np.int64(247)),
         # ]
 
-        # test_tiles = [
-        #     (np.int64(80), np.int64(317)),
-        #     (np.int64(77), np.int64(326)),
-        #     (np.int64(79), np.int64(317)),
-        #     (np.int64(79), np.int64(330)),
-        #     (np.int64(79), np.int64(339)),
-        #     (np.int64(80), np.int64(337)),
-        #     (np.int64(82), np.int64(316)),
-        #     (np.int64(82), np.int64(334)),
-        #     (np.int64(82), np.int64(336)),
-        #     (np.int64(83), np.int64(338)),
-        #     (np.int64(84), np.int64(334)),
-        #     (np.int64(99), np.int64(318)),
-        #     (np.int64(229), np.int64(291)),
-        #     (np.int64(243), np.int64(290)),
-        #     (np.int64(276), np.int64(274)),
-        # ]
+        test_tiles = [
+            (np.int64(80), np.int64(317)),
+            (np.int64(77), np.int64(326)),
+            (np.int64(79), np.int64(317)),
+            (np.int64(79), np.int64(330)),
+            (np.int64(79), np.int64(339)),
+            (np.int64(80), np.int64(337)),
+            (np.int64(82), np.int64(316)),
+            (np.int64(82), np.int64(334)),
+            (np.int64(82), np.int64(336)),
+            (np.int64(83), np.int64(338)),
+            (np.int64(84), np.int64(334)),
+            (np.int64(99), np.int64(318)),
+            (np.int64(229), np.int64(291)),
+            (np.int64(243), np.int64(290)),
+            (np.int64(276), np.int64(274)),
+        ]
         if 'test_tiles' in locals() and test_tiles is not None and len(test_tiles) != 0:
             # Filter test tiles, make sure they are available in the required bands
             test_tiles = [tile for tile in test_tiles if tile in tiles_to_process]
@@ -628,10 +628,10 @@ def report_progress_and_memory(
                 stats = progress_results[band]
                 log_messages.append(f'\nProgress for band {band}:')
                 log_messages.append(
-                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed, {stats['mostly_zeros']} mostly zeros"
+                    f'  Overall: {stats["total_completed"]}/{stats["total_available"]} completed, {stats["total_failed"]} failed, {stats["download_failed"]} download failed, {stats["mostly_zeros"]} mostly zeros'
                 )
                 log_messages.append(
-                    f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['remaining_in_run']} remaining"
+                    f'  Current run: {stats["current_run_processed"]} processed, {stats["in_progress"]} in progress, {stats["remaining_in_run"]} remaining'
                 )
 
             log_messages.append(f'\nTotal memory usage across all processes: {memory_usage:.2f} GB')

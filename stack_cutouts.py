@@ -25,7 +25,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='full_res_groups',
+    name='full_res_test',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -155,7 +155,7 @@ fuse_bands = ['whigs-g', 'cfis_lsb-r', 'ps-i']
 # process all available bands?
 process_all_available = True
 # combine cutouts?
-combine_cutouts = True
+combine_cutouts = False
 # aggregate cutouts to larger files?
 aggregate_cutouts = False
 # retrieve from the VOSpace and update the currently available tiles; takes some time to run
@@ -186,11 +186,11 @@ cutout_size = 256
 # use original resolution?
 use_full_resolution = True
 # process only group tiles?
-process_groups_only = True
+process_groups_only = False
 # maximum on-sky separation to match detections across different bands in arcsec
 maximum_match_separation = 10.0
 # number of negative examples (nearest non-dwarf neighbors) for each positive example (dwarf)
-negatives_per_positive = 20
+negatives_per_positive = 5
 
 ### Multiprocessing constants
 NUM_CORES = psutil.cpu_count(logical=False)  # Number of physical cores
@@ -568,7 +568,18 @@ def make_cutouts_for_band(data_path, tile, cut_size, seg_mode):
 
 
 def save_cutouts_to_h5(
-    tile, output_path, cutouts, segmaps, ras, decs, known_ids, labels, zspecs, band_names, seg_mode
+    tile,
+    output_path,
+    cutouts,
+    segmaps,
+    ras,
+    decs,
+    known_ids,
+    labels,
+    zspecs,
+    band_names,
+    seg_mode,
+    unique_id,
 ):
     try:
         dt = h5py.special_dtype(vlen=str)
@@ -583,6 +594,7 @@ def save_cutouts_to_h5(
             f.create_dataset('label', data=labels.astype(np.float32))
             f.create_dataset('zspec', data=zspecs.astype(np.float32))
             f.create_dataset('band_names', data=np.array(band_names, dtype='S'))
+            f.create_dataset('unique_id', data=unique_id.astype(np.int32))
         logger.debug(f'Created matched cutouts file: {output_path}')
     except Exception as e:
         logger.error(f'Error saving to H5 file {output_path}: {e}', exc_info=True)
@@ -722,7 +734,7 @@ def process_tile(
         logger.info(f'Matching and combining detections in tile {tile_str(tile)}')
         tile_dir = f'{str(tile[0]).zfill(3)}_{str(tile[1]).zfill(3)}'
         if use_full_res:
-            output_file = f'{tile_dir}_matched_cutouts_full_res.h5'
+            output_file = f'{tile_dir}_matched_cutouts_full_res_new.h5'
         else:
             output_file = f'{tile_dir}_matched_cutouts.h5'
         out_dir = os.path.join(parent_dir, tile_dir, 'gri')
@@ -749,8 +761,21 @@ def process_tile(
             }
         try:
             # Match objects across bands
-            multi_band_objects, object_indices, final_ras, final_decs, known_ids, labels, zspecs = (
-                match_coordinates_across_bands(band_data, max_sep, tile)
+            # multi_band_objects, object_indices, final_ras, final_decs, known_ids, labels, zspecs = (
+            #     match_coordinates_across_bands(band_data, max_sep, tile)
+            # )
+            matched_df = match_coordinates_across_bands(band_data=band_data, max_sep=max_sep)
+            matched_df.to_parquet(
+                os.path.join(out_dir, f'{tile_dir}_matched_detections.parquet'), index=False
+            )
+            multi_band_objects, _, final_ras, final_decs, known_ids, labels, zspecs = (
+                matched_df['unique_id'],
+                matched_df['unique_id'],
+                matched_df['ra'],
+                matched_df['dec'],
+                matched_df['ID_known'],
+                matched_df['lsb'],
+                matched_df['zspec'],
             )
         except Exception as e:
             logger.error(f'Tile: {tile}: error in match_coordinates_across_bands: {e}.')
@@ -849,6 +874,7 @@ def process_tile(
             zspecs=zspecs,
             band_names=band_names,
             seg_mode=seg_mode,
+            unique_id=matched_df['unique_id'].values,
         )
 
         if accumulate_lsb and lsb_file_path and file_lock:
@@ -1020,7 +1046,7 @@ def process_worker(
                         file_lock=lsb_h5_lock,
                     )
                     logger.debug(
-                        f'Finished processing tile {tile} in {time.time()-process_start:.2f}s.'
+                        f'Finished processing tile {tile} in {time.time() - process_start:.2f}s.'
                     )
                 except Exception as e:
                     logger.error(f'Exception in process tile: {e}')
@@ -1129,7 +1155,6 @@ def main(
             logger.error(f'File not found: {catalog_path}')
             raise FileNotFoundError
 
-        # get the list of tiles for which r and at least two more bands are available
         _, tiles_x_bands, _ = input_to_tile_list(
             availability,
             band_constr,
@@ -1199,7 +1224,7 @@ def main(
                 # Create an event to signal when all downloads are complete
                 all_downloads_complete = multiprocessing.Event()
                 # Set number of download threads
-                num_download_threads = min(2 * num_processes, len(unprocessed_jobs))
+                num_download_threads = min(PREFETCH_FACTOR * num_processes, len(unprocessed_jobs))
                 logger.info(f'Using {num_download_threads} download threads.')
 
                 # Start download threads
@@ -1271,10 +1296,10 @@ def main(
                         stats = progress_results[band]
                         log_messages.append(f'\nProgress for band {band}:')
                         log_messages.append(
-                            f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed, {stats['mostly_zeros']} mostly_zeros"
+                            f'  Overall: {stats["total_completed"]}/{stats["total_available"]} completed, {stats["total_failed"]} failed, {stats["download_failed"]} download failed, {stats["mostly_zeros"]} mostly_zeros'
                         )
                         log_messages.append(
-                            f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['downloaded']} downloaded, {stats['downloading']} downloading, {stats['remaining_in_run']} remaining"
+                            f'  Current run: {stats["current_run_processed"]} processed, {stats["in_progress"]} in progress, {stats["downloaded"]} downloaded, {stats["downloading"]} downloading, {stats["remaining_in_run"]} remaining'
                         )
 
                     # Log all messages together
@@ -1400,7 +1425,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--processing_cores',
         type=int,
-        default=16,
+        default=15,
         help='Number of cores to use for processing (default: 15)',
     )
     parser.add_argument(

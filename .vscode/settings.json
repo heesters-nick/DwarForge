@@ -9,5 +9,6 @@
   },
   "python.analysis.autoImportCompletions": true,
   "python.analysis.typeCheckingMode": "basic",
-  "remote.autoForwardPortsFallback": 0
+  "remote.autoForwardPortsFallback": 0,
+  "zenMode.hideStatusBar": false
 }

@@ -40,6 +40,7 @@ def combine_h5_files(
     label_filters=None,  # None for all, or list like ['nan', 0, 1]
     prefix='combined',
     preprocess=False,
+    prep_mode='training',
 ):
     """
     Combine objects from multiple h5 files into larger files with objects_per_file objects.
@@ -113,15 +114,15 @@ def combine_h5_files(
 
                     if preprocess:
                         cutouts = np.array(f['images'])[subset_mask]
-                        assert (
-                            cutouts.ndim == 4
-                        ), f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
-                        assert (
-                            cutouts.shape[1] == 3
-                        ), f'Expected 3 bands, got shape: {cutouts.shape}'
+                        assert cutouts.ndim == 4, (
+                            f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
+                        )
+                        assert cutouts.shape[1] == 3, (
+                            f'Expected 3 bands, got shape: {cutouts.shape}'
+                        )
                         cutout_stack = np.zeros_like(cutouts, dtype=np.float32)
                         for i, cutout in enumerate(cutouts):
-                            cutout_stack[i] = preprocess_cutout(cutout)
+                            cutout_stack[i] = preprocess_cutout(cutout, mode=prep_mode)
                     else:
                         cutout_stack = np.array(f['images'])[subset_mask]
 
@@ -158,12 +159,12 @@ def combine_h5_files(
 
                         if preprocess:
                             cutouts = np.array(f['images'])[remaining_mask]
-                            assert (
-                                cutouts.ndim == 4
-                            ), f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
-                            assert (
-                                cutouts.shape[1] == 3
-                            ), f'Expected 3 bands, got shape: {cutouts.shape}'
+                            assert cutouts.ndim == 4, (
+                                f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
+                            )
+                            assert cutouts.shape[1] == 3, (
+                                f'Expected 3 bands, got shape: {cutouts.shape}'
+                            )
                             cutout_stack = np.zeros_like(cutouts, dtype=np.float32)
                             for i, cutout in enumerate(cutouts):
                                 cutout_stack[i] = preprocess_cutout(cutout)
@@ -223,13 +224,15 @@ if __name__ == '__main__':
     project_dir = '/arc/home/heestersnick/dwarforge'
     output_dir = os.path.join('/arc/projects/unions/ssl/data/raw/tiles', 'combined_h5_files')
 
-    label_filter = None  # ['nan', 0, 1] or None to include all objects
+    label_filter = [0]  # ['nan', 0, 1] or None to include all objects
     file_prefix = 'combined'
-    objects_per_file = 200
-    # number of tiles to combine
-    number_of_tiles = 50
+    objects_per_file = 5000
+    # number of tiles to combine, None -> take all tiles
+    number_of_tiles = 500
     # preprocess cutouts, i.e., make rgb?
     preprocess_cutouts = True
+    # preprocessing mode, 'vis' or 'training'. vis = missing channel -> average of other two
+    preprocessing_mode = 'vis'
 
     # read input tile df
     tables = os.path.join(project_dir, 'tables')
@@ -256,4 +259,5 @@ if __name__ == '__main__':
         label_filters=label_filter,
         prefix=file_prefix,
         preprocess=preprocess_cutouts,
+        prep_mode=preprocessing_mode,
     )
