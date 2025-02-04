@@ -17,66 +17,67 @@ def process_channels(
     Create an RGB image from three bands of data preserving relative channel intensities.
     Handles channels that are all zeros.
     """
-    red = img[:, :, 0]
-    green = img[:, :, 1]
-    blue = img[:, :, 2]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        red = img[:, :, 0]
+        green = img[:, :, 1]
+        blue = img[:, :, 2]
 
-    # Check for zero channels
-    red_is_zero = np.all(red == 0)
-    green_is_zero = np.all(green == 0)
-    blue_is_zero = np.all(blue == 0)
+        # Check for zero channels
+        red_is_zero = np.all(red == 0)
+        green_is_zero = np.all(green == 0)
+        blue_is_zero = np.all(blue == 0)
 
-    # Compute average intensity before scaling choice (avoiding zero channels)
-    nonzero_channels = []
-    if not red_is_zero:
-        nonzero_channels.append(red)
-    if not green_is_zero:
-        nonzero_channels.append(green)
-    if not blue_is_zero:
-        nonzero_channels.append(blue)
-
-    if nonzero_channels:
-        i_mean = sum(nonzero_channels) / len(nonzero_channels)
-    else:
-        i_mean = np.zeros_like(red)  # All channels are zero
-
-    if scaling_type == 'asinh':
-        # Apply asinh scaling only to non-zero channels
+        # Compute average intensity before scaling choice (avoiding zero channels)
+        nonzero_channels = []
         if not red_is_zero:
-            red = red * np.arcsinh(stretch * Q * (i_mean)) / (Q * i_mean)
+            nonzero_channels.append(red)
         if not green_is_zero:
-            green = green * np.arcsinh(stretch * Q * (i_mean)) / (Q * i_mean)
+            nonzero_channels.append(green)
         if not blue_is_zero:
-            blue = blue * np.arcsinh(stretch * Q * (i_mean)) / (Q * i_mean)
-    elif scaling_type == 'linear':
-        # Apply linear scaling without normalization
-        if not red_is_zero:
-            red = red * stretch
-        if not green_is_zero:
-            green = green * stretch
-        if not blue_is_zero:
-            blue = blue * stretch
-    else:
-        raise ValueError(f'Unknown scaling type: {scaling_type}')
+            nonzero_channels.append(blue)
 
-    # Apply gamma correction only to non-zero channels
-    if gamma is not None:
-        if not red_is_zero:
-            red_mask = abs(red) <= 1e-9
-            red = np.sign(red) * (abs(red) ** gamma)  # Preserve sign
-            red[red_mask] = 0
+        if nonzero_channels:
+            i_mean = sum(nonzero_channels) / len(nonzero_channels)
+        else:
+            i_mean = np.zeros_like(red)  # All channels are zero
 
-        if not green_is_zero:
-            green_mask = abs(green) <= 1e-9
-            green = np.sign(green) * (abs(green) ** gamma)
-            green[green_mask] = 0
+        if scaling_type == 'asinh':
+            # Apply asinh scaling only to non-zero channels
+            if not red_is_zero:
+                red = red * np.arcsinh(stretch * Q * (i_mean)) / (Q * i_mean)
+            if not green_is_zero:
+                green = green * np.arcsinh(stretch * Q * (i_mean)) / (Q * i_mean)
+            if not blue_is_zero:
+                blue = blue * np.arcsinh(stretch * Q * (i_mean)) / (Q * i_mean)
+        elif scaling_type == 'linear':
+            # Apply linear scaling without normalization
+            if not red_is_zero:
+                red = red * stretch
+            if not green_is_zero:
+                green = green * stretch
+            if not blue_is_zero:
+                blue = blue * stretch
+        else:
+            raise ValueError(f'Unknown scaling type: {scaling_type}')
 
-        if not blue_is_zero:
-            blue_mask = abs(blue) <= 1e-9
-            blue = np.sign(blue) * (abs(blue) ** gamma)
-            blue[blue_mask] = 0
+        # Apply gamma correction only to non-zero channels
+        if gamma is not None:
+            if not red_is_zero:
+                red_mask = abs(red) <= 1e-9
+                red = np.sign(red) * (abs(red) ** gamma)  # Preserve sign
+                red[red_mask] = 0
 
-    result = np.stack([red, green, blue], axis=-1).astype(np.float32)
+            if not green_is_zero:
+                green_mask = abs(green) <= 1e-9
+                green = np.sign(green) * (abs(green) ** gamma)
+                green[green_mask] = 0
+
+            if not blue_is_zero:
+                blue_mask = abs(blue) <= 1e-9
+                blue = np.sign(blue) * (abs(blue) ** gamma)
+                blue[blue_mask] = 0
+
+        result = np.stack([red, green, blue], axis=-1).astype(np.float32)
     return result
 
 

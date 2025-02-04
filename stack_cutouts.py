@@ -6,7 +6,6 @@ import os  # noqa: E402
 import queue
 import threading
 import time
-import traceback
 import warnings  # noqa: E402
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import timedelta
@@ -17,6 +16,7 @@ from multiprocessing import (
 import h5py
 import numpy as np
 import pandas as pd
+import torch
 from astropy.coordinates import SkyCoord
 from scipy.spatial import cKDTree
 from tqdm import tqdm
@@ -25,7 +25,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='full_res_test',
+    name='inference_test',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -35,6 +35,7 @@ from vos import Client  # noqa: E402
 
 from download import download_worker  # noqa: E402
 from kd_tree import build_tree  # noqa: E402
+from make_rbg import preprocess_cutout  # noqa: E402
 from postprocess import (  # noqa: E402
     load_segmap,
     make_cutouts,
@@ -59,6 +60,7 @@ from utils import (  # noqa: E402
     tile_str,
     update_available_tiles,
 )
+from zoobot_utils import ZooBot_lightning, get_dwarf_predictions, load_model  # noqa: E402
 
 warnings.filterwarnings('ignore', message="'datfix' made the change", append=True)
 warnings.filterwarnings(
@@ -187,6 +189,8 @@ cutout_size = 256
 use_full_resolution = True
 # process only group tiles?
 process_groups_only = False
+# apply trained model on the data?
+run_inference = True
 # maximum on-sky separation to match detections across different bands in arcsec
 maximum_match_separation = 10.0
 # number of negative examples (nearest non-dwarf neighbors) for each positive example (dwarf)
@@ -194,7 +198,11 @@ negatives_per_positive = 5
 
 ### Multiprocessing constants
 NUM_CORES = psutil.cpu_count(logical=False)  # Number of physical cores
-PREFETCH_FACTOR = 2  # Number of prefetched tiles per core
+PREFETCH_FACTOR = 3  # Number of prefetched tiles per core
+### Inference
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DTYPE = torch.float32
+model_name = 'epoch43_train_loss_0.0187_valid_loss_0.0285.ckpt'
 
 ### paths ###
 platform = 'CANFAR'  #'CANFAR' #'Narval'
@@ -264,6 +272,10 @@ database_directory = os.path.join(main_directory, 'databases')
 os.makedirs(database_directory, exist_ok=True)
 # define file path where to save the lsb cutouts
 accumulated_lsb_path = os.path.join(cutout_directory, 'lsb_gri.h5')
+# model directory
+model_dir = os.path.join(main_directory, 'models')
+os.makedirs(model_dir, exist_ok=True)
+path_to_model = os.path.join(model_dir, model_name)
 
 
 def query_availability(update, in_dict, at_least_key, show_stats, build_kdtree, tile_info_dir):
@@ -580,6 +592,7 @@ def save_cutouts_to_h5(
     band_names,
     seg_mode,
     unique_id,
+    zoobot_pred,
 ):
     try:
         dt = h5py.special_dtype(vlen=str)
@@ -595,6 +608,8 @@ def save_cutouts_to_h5(
             f.create_dataset('zspec', data=zspecs.astype(np.float32))
             f.create_dataset('band_names', data=np.array(band_names, dtype='S'))
             f.create_dataset('unique_id', data=unique_id.astype(np.int32))
+            if zoobot_pred is not None:
+                f.create_dataset('zoobot_pred', data=zoobot_pred.astype(np.float32))
         logger.debug(f'Created matched cutouts file: {output_path}')
     except Exception as e:
         logger.error(f'Error saving to H5 file {output_path}: {e}', exc_info=True)
@@ -729,12 +744,15 @@ def process_tile(
     accumulate_lsb=False,
     lsb_file_path=None,
     file_lock=None,
+    inference=False,
+    model=None,
 ):
     try:
         logger.info(f'Matching and combining detections in tile {tile_str(tile)}')
+        num_objects = 0
         tile_dir = f'{str(tile[0]).zfill(3)}_{str(tile[1]).zfill(3)}'
         if use_full_res:
-            output_file = f'{tile_dir}_matched_cutouts_full_res_new.h5'
+            output_file = f'{tile_dir}_matched_cutouts_full_res_final.h5'
         else:
             output_file = f'{tile_dir}_matched_cutouts.h5'
         out_dir = os.path.join(parent_dir, tile_dir, 'gri')
@@ -743,53 +761,62 @@ def process_tile(
 
         # Read data and coordinates for all bands
         band_data = {}
+        valid_bands = []
+
         for band in band_names:
             try:
+                start_read = time.time()
                 data, header, segmap, ra, dec, df = read_band_data(
                     parent_dir, tile_dir, tile, band, in_dict, seg_mode, use_full_res
                 )
+                logger.debug(
+                    f'Reading band data for tile {tile} took {time.time() - start_read:.2f} seconds.'
+                )
+                if data is not None and len(ra) > 0:
+                    band_data[band] = {
+                        'data': data,
+                        'header': header,
+                        'segmap': segmap,
+                        'df': df,
+                        'ra': ra,
+                        'dec': dec,
+                    }
+                    valid_bands.append(band)
             except Exception as e:
-                logger.error(f'Tile {tile}, band: {band}, error reading band data: {e}')
-                return
-            band_data[band] = {
-                'data': data,
-                'header': header,
-                'segmap': segmap,
-                'df': df,
-                'ra': ra,
-                'dec': dec,
-            }
-        try:
-            # Match objects across bands
-            # multi_band_objects, object_indices, final_ras, final_decs, known_ids, labels, zspecs = (
-            #     match_coordinates_across_bands(band_data, max_sep, tile)
-            # )
-            matched_df = match_coordinates_across_bands(band_data=band_data, max_sep=max_sep)
-            matched_df.to_parquet(
-                os.path.join(out_dir, f'{tile_dir}_matched_detections.parquet'), index=False
-            )
-            multi_band_objects, _, final_ras, final_decs, known_ids, labels, zspecs = (
-                matched_df['unique_id'],
-                matched_df['unique_id'],
-                matched_df['ra'],
-                matched_df['dec'],
-                matched_df['ID_known'],
-                matched_df['lsb'],
-                matched_df['zspec'],
-            )
-        except Exception as e:
-            logger.error(f'Tile: {tile}: error in match_coordinates_across_bands: {e}.')
-            logger.error(f'Tile {tile}: Unhandled error in match_coordinates_across_bands: {e}')
-            logger.error(f'Tile {tile}: Error type: {type(e).__name__}')
-            logger.error(f'Tile {tile}: Error args: {e.args}')
-            logger.error(f'Tile {tile}: Traceback: {traceback.format_exc()}')
-            raise
+                logger.warning(f'Failed to read band {band} for tile {tile}: {e}')
+                continue
+
+        # Check if we have enough valid bands to proceed
+        if len(valid_bands) < 2:
+            logger.warning(f'Insufficient valid bands ({len(valid_bands)}) for tile {tile}')
+            return 0
+
+        # Match objects across bands
+        start_match = time.time()
+
+        matched_df = match_coordinates_across_bands(band_data=band_data, max_sep=max_sep)
+
+        if len(matched_df) == 0:
+            logger.info(f'No matched objects found in tile {tile}')
+            return 0
+
+        final_ras, final_decs, labels, known_ids, zspecs, unique_id = (
+            matched_df['ra'].values,
+            matched_df['dec'].values,
+            matched_df['lsb'].values,
+            matched_df['ID_known'].values,
+            matched_df['zspec'].values,
+            matched_df['unique_id'].values,
+        )
+        logger.debug(f'Matching for tile {tile} took {time.time() - start_match:.2f} seconds.')
 
         # Create cutouts for matched objects
-        num_objects = len(multi_band_objects)
+        num_objects = len(matched_df)
+        logger.info(f'There are {num_objects} matched detections in tile {tile}.')
+
         if num_objects < n_neighbors:
             logger.info(f'Tile {tile}: num matches is smaller than {n_neighbors}.')
-        logger.debug(f'There are {num_objects} matched detections in tile {tile}.')
+
         final_cutouts = np.zeros(
             (num_objects, len(band_names), cut_size, cut_size), dtype=np.float32
         )
@@ -798,26 +825,59 @@ def process_tile(
             if seg_mode is not None
             else None
         )
+        try:
+            for i, band in enumerate(band_names):
+                if band not in valid_bands:
+                    continue
+                data = band_data[band]['data']
+                header = band_data[band]['header']
+                segmap = band_data[band]['segmap']
 
-        for i, band in enumerate(band_names):
-            data = band_data[band]['data']
-            header = band_data[band]['header']
-            segmap = band_data[band]['segmap']
+                cutouts, cutouts_seg = make_cutouts(
+                    data=data,
+                    header=header,
+                    tile_str=tile_str(tile),
+                    ra=final_ras,
+                    dec=final_decs,
+                    segmap=segmap,
+                    cutout_size=cutout_size,
+                    seg_mode=seg_mode,
+                )
 
-            cutouts, cutouts_seg = make_cutouts(
-                data=data,
-                header=header,
-                tile_str=tile_str(tile),
-                ra=final_ras,
-                dec=final_decs,
-                segmap=segmap,
-                cutout_size=cutout_size,
-                seg_mode=seg_mode,
+                final_cutouts[:, i, :, :] = cutouts
+                if seg_mode is not None:
+                    final_segmaps[:, i, :, :] = cutouts_seg
+        except Exception as e:
+            logger.error(f'Error in cutout creation: {e}.')
+            return 0
+
+        if inference:
+            start_rgb = time.time()
+            # make cutouts rgb-ready for inference
+            cutouts_rgb = np.zeros_like(final_cutouts, dtype=np.float32)
+            for i, cutout in enumerate(final_cutouts):
+                cutouts_rgb[i] = preprocess_cutout(cutout, mode='vis')
+            # make sure there are no nan values in the cutouts
+            cutouts_rgb = np.nan_to_num(cutouts_rgb, nan=0.0)
+            logger.debug(
+                f'Creating RGB images for tile {tile_dir} took {time.time() - start_rgb:.2f} seconds.'
             )
-
-            final_cutouts[:, i, :, :] = cutouts
-            if seg_mode is not None:
-                final_segmaps[:, i, :, :] = cutouts_seg
+            start_inf = time.time()
+            # run inference
+            zoobot_predictions = get_dwarf_predictions(
+                model=model,
+                data=cutouts_rgb,
+                batch_size=cutouts_rgb.shape[0],
+                dtype=DTYPE,
+                device=DEVICE,
+            )
+            logger.debug(
+                f'Inference on {cutouts_rgb.shape[0]} objects took {time.time() - start_inf:.2f} seconds.'
+            )
+            # add predictions to combined detection df
+            matched_df['zoobot_pred'] = zoobot_predictions
+        else:
+            zoobot_predictions = None
 
         # Process LSB objects
         lsb_indices = np.where(labels == 1)[0]  # Assuming 1 indicates LSB objects
@@ -874,7 +934,12 @@ def process_tile(
             zspecs=zspecs,
             band_names=band_names,
             seg_mode=seg_mode,
-            unique_id=matched_df['unique_id'].values,
+            unique_id=unique_id,
+            zoobot_pred=zoobot_predictions,
+        )
+        # save cross-matched detection dataframe
+        matched_df.to_parquet(
+            os.path.join(out_dir, f'{tile_dir}_matched_detections.parquet'), index=False
         )
 
         if accumulate_lsb and lsb_file_path and file_lock:
@@ -967,6 +1032,9 @@ def process_worker(
     accumulate_lsb=False,
     lsb_h5_path=None,
     lsb_h5_lock=None,
+    inference=False,
+    model_state_dict=None,
+    hparams=None,
 ):
     """
     Worker that processes downloaded full resolution data.
@@ -989,9 +1057,20 @@ def process_worker(
         accumulate_lsb: Accumulate all lsb cutouts to a single h5 file
         lsb_h5_path: Path to lsb h5 file
         lsb_h5_lock: Multiprocessing lock to avoid race conditions
+        model_state_dict: model state dictionary
+        hparams: model hyperparameters
     """
     worker_id = os.getpid()
     logger.debug(f'Processing worker {worker_id} started')
+
+    if inference:
+        model = ZooBot_lightning(**hparams)
+        model.load_state_dict(model_state_dict)
+        model.freeze()
+        model.eval()
+        model = model.to(DEVICE)
+    else:
+        model = None
 
     while not (
         shutdown_flag.is_set() or (all_downloads_complete.is_set() and process_queue.empty())
@@ -1029,27 +1108,27 @@ def process_worker(
                     update_cutout_info(database, cutout_info, db_lock)
 
                 logger.info(f'Processing tile {tile}..')
-                try:
-                    process_start = time.time()
-                    result = process_tile(
-                        tile=tile,
-                        parent_dir=download_dir,
-                        in_dict=band_dict,
-                        band_names=required_bands,
-                        cut_size=cut_size,
-                        seg_mode=seg_mode,
-                        max_sep=max_sep,
-                        n_neighbors=n_neighbors,
-                        use_full_res=True,
-                        accumulate_lsb=accumulate_lsb,
-                        lsb_file_path=lsb_h5_path,
-                        file_lock=lsb_h5_lock,
-                    )
-                    logger.debug(
-                        f'Finished processing tile {tile} in {time.time() - process_start:.2f}s.'
-                    )
-                except Exception as e:
-                    logger.error(f'Exception in process tile: {e}')
+
+                process_start = time.time()
+                result = process_tile(
+                    tile=tile,
+                    parent_dir=download_dir,
+                    in_dict=band_dict,
+                    band_names=required_bands,
+                    cut_size=cut_size,
+                    seg_mode=seg_mode,
+                    max_sep=max_sep,
+                    n_neighbors=n_neighbors,
+                    use_full_res=True,
+                    accumulate_lsb=accumulate_lsb,
+                    lsb_file_path=lsb_h5_path,
+                    file_lock=lsb_h5_lock,
+                    inference=inference,
+                    model=model,
+                )
+                logger.debug(
+                    f'Finished processing tile {tile} in {time.time() - process_start:.2f}s.'
+                )
 
                 # Update status for all bands
                 if result is not None:
@@ -1141,8 +1220,15 @@ def main(
     lsb_h5_path=None,
     process_groups=False,
     group_tiles=None,
+    inference=False,
+    model_path=None,
 ):
     try:
+        if inference:
+            model_state_dict, hparams = load_model(model_path)
+        else:
+            model_state_dict, hparams = None, None
+
         # query availability of the tiles
         availability, all_tiles = query_availability(
             update, band_dict, at_least, show_tile_stats, build_kdtree, tile_info_dir
@@ -1215,7 +1301,7 @@ def main(
                 unprocessed_jobs_at_start = {band: 0 for band in band_dict.keys()}
 
                 for job in unprocessed_jobs:
-                    logger.debug(f'Job: {job}')
+                    logger.info(f'Job: {job}')
                     unprocessed_jobs_at_start[job[1]] += 1
                     download_queue.put(job)
 
@@ -1273,6 +1359,9 @@ def main(
                             accumulate_lsb,
                             lsb_h5_path,
                             lsb_h5_lock,
+                            inference,
+                            model_state_dict,
+                            hparams,
                         ),
                     )
                     p.start()
@@ -1477,6 +1566,8 @@ if __name__ == '__main__':
         'lsb_h5_path': accumulated_lsb_path,
         'process_groups': process_groups_only,
         'group_tiles': tiles_in_groups,
+        'inference': run_inference,
+        'model_path': path_to_model,
     }
 
     start = time.time()
