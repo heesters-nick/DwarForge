@@ -12,3 +12,4 @@ databases/
 auth/
 cutouts/
 upload_checkpoints/
+*.parquet
