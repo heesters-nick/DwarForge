@@ -13,3 +13,4 @@ auth/
 cutouts/
 upload_checkpoints/
 *.parquet
+desi/

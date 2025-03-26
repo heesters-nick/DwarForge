@@ -253,10 +253,10 @@ class DriveUploader:
 
 # Example usage
 if __name__ == '__main__':
-    folder_id = '1ahQ7_zqLlwVluaw1o_mWyM2A8JV4KaJA'
+    folder_id = '1Zy-KmrUP25HkBujNJCy_6QZR3EdJjrng'
     base_dir = '/arc/projects/unions/ssl/data/raw/tiles'
     project_dir = '/arc/home/heestersnick/dwarforge'
-    source_directory = os.path.join(base_dir, 'combined_h5_files')
+    source_directory = os.path.join(project_dir, 'desi')
 
     try:
         uploader = DriveUploader(
@@ -266,8 +266,8 @@ if __name__ == '__main__':
         results = uploader.batch_upload(
             source_path=source_directory,
             folder_id=folder_id,
-            max_workers=10,
-            file_pattern='*.h5',
+            max_workers=5,
+            file_pattern='*prep.h5',
         )
     except Exception as e:
         logger.error(f'An error occurred: {str(e)}')
