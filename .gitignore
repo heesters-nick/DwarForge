@@ -14,3 +14,6 @@ cutouts/
 upload_checkpoints/
 *.parquet
 desi/
+tables/all_desi_unions_matched.csv
+notebooks/inference.ipynb
+inference-checkpoint.ipynb
