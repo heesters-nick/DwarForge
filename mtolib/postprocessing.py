@@ -153,20 +153,20 @@ def get_object_parameters(img, node_id, pixel_indices):
 
     # Get first-order moments
     f_o_m = get_first_order_moments(pixel_indices, pixel_values, flux_sum)
-    p.extend(f_o_m)
+    p.extend(f_o_m)  # type: ignore
 
     # Get second-order moments
     second_order_moments = [
         *get_second_order_moments(pixel_indices, pixel_values, flux_sum, *f_o_m)
     ]
-    p.extend(second_order_moments)
+    p.extend(second_order_moments)  # type: ignore
 
-    p.append(np.float32(flux_sum))
-    p.extend(get_basic_stats(pixel_values))
+    p.append(np.float32(flux_sum))  # type: ignore
+    p.extend(get_basic_stats(pixel_values))  # type: ignore
 
     radii, half_max = get_light_distribution(pixel_values, flux_sum)
-    p.append(half_max)
-    p.extend(radii)
+    p.append(half_max)  # type: ignore
+    p.extend(radii)  # type: ignore
     p.append(np.int32(len(pixel_values)))
 
     return p
@@ -210,12 +210,12 @@ def get_second_order_moments(indices, values, flux_sum, x, y):
     with np.errstate(invalid='raise'):
         try:
             major_axis = np.sqrt(lhs + rhs)
-        except:
+        except Exception:
             major_axis = 0
 
         try:
             minor_axis = np.sqrt(lhs - rhs)
-        except:
+        except Exception:
             minor_axis = 0
 
     # Solve for theta - major axis angle

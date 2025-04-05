@@ -186,8 +186,8 @@ def worker_process(tile_batch, model_paths, process_batch_size, inference_batch_
                     continue
 
                 # Read all necessary data into memory
-                cutouts = h5_file['images'][:]
-                object_ids = h5_file['unique_id'][:]
+                cutouts = h5_file['images'][:]  # type: ignore
+                object_ids = h5_file['unique_id'][:]  # type: ignore
 
             # Preprocess all cutouts
             preprocessed_images = process_cutouts(cutouts, process_batch_size=process_batch_size)
@@ -226,7 +226,7 @@ def worker_process(tile_batch, model_paths, process_batch_size, inference_batch_
             df = pd.read_parquet(parquet_path)
 
             # Create a mapping from object_id to prediction
-            prediction_map = dict(zip(object_ids, all_predictions))
+            prediction_map = dict(zip(object_ids, all_predictions))  # type: ignore
 
             # Add predictions to dataframe
             df['zoobot_pred_v2'] = df['unique_id'].map(prediction_map)
@@ -500,8 +500,8 @@ def run_test(config):
                     continue
 
                 # Read necessary data for inference
-                cutouts = original_h5['images'][:]
-                object_ids = original_h5['unique_id'][:]
+                cutouts = original_h5['images'][:]  # type: ignore
+                object_ids = original_h5['unique_id'][:]  # type: ignore
 
             # Process the data
             start_process = time.time()
@@ -534,7 +534,7 @@ def run_test(config):
             df = pd.read_parquet(test_parquet_path)
 
             # Create a mapping from object_id to prediction
-            prediction_map = dict(zip(object_ids, all_predictions))
+            prediction_map = dict(zip(object_ids, all_predictions))  # type: ignore
 
             # Add predictions to dataframe
             df['zoobot_pred_v2'] = df['unique_id'].map(prediction_map)

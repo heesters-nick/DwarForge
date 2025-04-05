@@ -248,10 +248,10 @@ def preprocess_cutout(
             logging.warning(log)  # Log the warning with contextual info
         else:
             # Let other warnings through normally
-            warnings.showwarning_default(message, category, filename, lineno, file, line)
+            warnings.showwarning_default(message, category, filename, lineno, file, line)  # type: ignore
 
     # Store the default warning handler
-    warnings.showwarning_default = warnings.showwarning
+    warnings.showwarning_default = warnings.showwarning  # type: ignore
     # Set our custom handler
     warnings.showwarning = local_warn_handler
 
@@ -344,6 +344,6 @@ def preprocess_cutout(
     img_linear = np.moveaxis(img_linear, -1, 0)
 
     # Restore default warning behavior after function completes
-    warnings.showwarning = warnings.showwarning_default
+    warnings.showwarning = warnings.showwarning_default  # type: ignore
 
     return img_linear

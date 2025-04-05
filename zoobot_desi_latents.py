@@ -163,18 +163,18 @@ def generate_rgb(
         # Apply gamma correction while preserving sign
         if gamma is not None:
             if not red_is_zero:
-                red_mask = abs(red) <= 1e-9
-                red = np.sign(red) * (abs(red) ** gamma)
+                red_mask = abs(red) <= 1e-9  # type: ignore
+                red = np.sign(red) * (abs(red) ** gamma)  # type: ignore
                 red[red_mask] = 0
 
             if not green_is_zero:
-                green_mask = abs(green) <= 1e-9
-                green = np.sign(green) * (abs(green) ** gamma)
+                green_mask = abs(green) <= 1e-9  # type: ignore
+                green = np.sign(green) * (abs(green) ** gamma)  # type: ignore
                 green[green_mask] = 0
 
             if not blue_is_zero:
-                blue_mask = abs(blue) <= 1e-9
-                blue = np.sign(blue) * (abs(blue) ** gamma)
+                blue_mask = abs(blue) <= 1e-9  # type: ignore
+                blue = np.sign(blue) * (abs(blue) ** gamma)  # type: ignore
                 blue[blue_mask] = 0
         # Stack the channels after scaling and gamma correction
         result = np.stack([red, green, blue], axis=-1).astype(np.float32)
@@ -456,15 +456,15 @@ def process_objects_with_model(
                     )
                     objects_not_found += num_targets_in_catalog
                     continue
-                h5_unique_ids = src_file['unique_id'][:]
+                h5_unique_ids = src_file['unique_id'][:]  # type: ignore
                 # Ensure h5_unique_ids is 1D array
-                if h5_unique_ids.ndim == 0:
+                if h5_unique_ids.ndim == 0:  # type: ignore
                     h5_unique_ids = np.array([h5_unique_ids])
-                if h5_unique_ids.ndim > 1:
-                    h5_unique_ids = h5_unique_ids.flatten()  # Adjust if needed
+                if h5_unique_ids.ndim > 1:  # type: ignore
+                    h5_unique_ids = h5_unique_ids.flatten()  # Adjust if needed # type: ignore
 
                 # 3. Find matches: Map H5 IDs to their indices
-                h5_id_to_index = {uid: idx for idx, uid in enumerate(h5_unique_ids)}
+                h5_id_to_index = {uid: idx for idx, uid in enumerate(h5_unique_ids)}  # type: ignore
 
                 # 4. Identify indices in H5 and corresponding catalog rows
                 valid_indices: List[int] = []  # Indices within H5 file
@@ -509,19 +509,20 @@ def process_objects_with_model(
                     )
                     objects_not_found += n_valid  # Count these as not found now
                     continue
-                images = src_file['images'][sorted_h5_indices]
+                images = src_file['images'][sorted_h5_indices]  # type: ignore
                 # 'images' now corresponds row-by-row to 'valid_catalog_objects_sorted'
 
                 # 10. Preprocess all extracted images for this tile
                 # Assuming H, W are last dims in H5, C=3 is output of generate_rgb
                 preprocessed_images = np.zeros(
-                    (n_valid, 3, images.shape[-2], images.shape[-1]), dtype=np.float32
+                    (n_valid, 3, images.shape[-2], images.shape[-1]),  # type: ignore
+                    dtype=np.float32,
                 )
 
                 for i in range(n_valid):
-                    cutout = images[i]  # Already loaded efficiently
+                    cutout = images[i]  # Already loaded efficiently # type: ignore
                     preprocessed = preprocess_cutout(
-                        cutout,
+                        cutout,  # type: ignore
                         mode=preprocessing_params['mode'],
                         replace_anomaly=preprocessing_params['replace_anomaly'],
                     )

@@ -275,12 +275,12 @@ def source_detection(
         mag_limit=mag_limit,
     )
     objects_df['star'] = 0
-    objects_df.loc[det_matching_idx, 'star'] = 1
-    objects_df.loc[det_matching_idx, 'Gmag'] = gaia_matches['Gmag'].values
+    objects_df.loc[det_matching_idx, 'star'] = 1  # type: ignore
+    objects_df.loc[det_matching_idx, 'Gmag'] = gaia_matches['Gmag'].values  # type: ignore
     objects_df['star_cand'] = 0
-    objects_df.loc[extended_flag_idx, 'star_cand'] = 1
+    objects_df.loc[extended_flag_idx, 'star_cand'] = 1  # type: ignore
     objects_df['Gmag_closest'] = np.nan
-    objects_df.loc[extended_flag_idx, 'Gmag_closest'] = extended_flag_mags
+    objects_df.loc[extended_flag_idx, 'Gmag_closest'] = extended_flag_mags  # type: ignore
     objects_df.insert(0, 'ID', objects_df.index + 1)
 
     data_sub[np.isnan(data_sub)] = 0.0

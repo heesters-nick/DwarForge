@@ -9,6 +9,7 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+import sep
 
 # import sep
 from astropy import units as u
@@ -515,7 +516,7 @@ def check_objects_in_neighboring_tiles(tile, dwarfs_df, header):
     return dwarfs_in_current_tile
 
 
-def get_dwarf_tile_list(dwarf_cat, in_dict, bands=None):
+def get_dwarf_tile_list(dwarf_cat, in_dict, bands):
     try:
         bands = [in_dict[band]['band'] for band in bands]
         dwarf_cat_filtered = get_df_for_bands(dwarf_cat, bands)
@@ -648,7 +649,7 @@ def open_fits(file_path, fits_ext):
     """
     logger.debug(f'Opening fits file {os.path.basename(file_path)}..')
     start_opening = time.time()
-    with fits.open(file_path, memmap=True) as hdul:
+    with fits.open(file_path, memmap=True) as hdul:  # type: ignore
         data = hdul[fits_ext].data.astype(np.float32)  # type: ignore
         header = hdul[fits_ext].header  # type: ignore
     logger.debug(
@@ -666,8 +667,8 @@ def create_cartesian_kdtree(ra, dec):
     :return: cKDTree object and the corresponding SkyCoord object
     """
     coords = SkyCoord(ra, dec, unit='deg', frame='icrs')
-    xyz = coords.cartesian.xyz.value.T
-    tree = cKDTree(xyz)
+    xyz = coords.cartesian.xyz.value.T  # type: ignore
+    tree = cKDTree(xyz)  # type: ignore
     return tree, coords
 
 

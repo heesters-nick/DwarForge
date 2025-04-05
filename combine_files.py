@@ -114,12 +114,12 @@ def combine_h5_files(
 
                     if preprocess:
                         cutouts = np.array(f['images'])[subset_mask]
-                        assert cutouts.ndim == 4, (
-                            f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
-                        )
-                        assert cutouts.shape[1] == 3, (
-                            f'Expected 3 bands, got shape: {cutouts.shape}'
-                        )
+                        assert (
+                            cutouts.ndim == 4
+                        ), f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
+                        assert (
+                            cutouts.shape[1] == 3
+                        ), f'Expected 3 bands, got shape: {cutouts.shape}'
                         cutout_stack = np.zeros_like(cutouts, dtype=np.float32)
                         for i, cutout in enumerate(cutouts):
                             cutout_stack[i] = preprocess_cutout(cutout, mode=prep_mode)
@@ -129,7 +129,7 @@ def combine_h5_files(
                     combined_data['images'].extend(cutout_stack)
                     combined_data['ra'].extend(np.array(f['ra'])[subset_mask])
                     combined_data['dec'].extend(np.array(f['dec'])[subset_mask])
-                    combined_data['tile'].extend([np.array(f['tile'])] * objects_to_take)
+                    combined_data['tile'].extend([np.array(f['tile'])] * objects_to_take)  # type: ignore
                     combined_data['known_id'].extend(np.array(f['known_id'])[subset_mask])
                     combined_data['label'].extend(np.array(f['label'])[subset_mask])
                     combined_data['zspec'].extend(np.array(f['zspec'])[subset_mask])
@@ -159,12 +159,12 @@ def combine_h5_files(
 
                         if preprocess:
                             cutouts = np.array(f['images'])[remaining_mask]
-                            assert cutouts.ndim == 4, (
-                                f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
-                            )
-                            assert cutouts.shape[1] == 3, (
-                                f'Expected 3 bands, got shape: {cutouts.shape}'
-                            )
+                            assert (
+                                cutouts.ndim == 4
+                            ), f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
+                            assert (
+                                cutouts.shape[1] == 3
+                            ), f'Expected 3 bands, got shape: {cutouts.shape}'
                             cutout_stack = np.zeros_like(cutouts, dtype=np.float32)
                             for i, cutout in enumerate(cutouts):
                                 cutout_stack[i] = preprocess_cutout(cutout)
@@ -175,13 +175,13 @@ def combine_h5_files(
                         combined_data['ra'].extend(np.array(f['ra'])[remaining_mask])
                         combined_data['dec'].extend(np.array(f['dec'])[remaining_mask])
                         combined_data['tile'].extend(
-                            [np.array(f['tile'])] * (n_objects - objects_to_take)
+                            [np.array(f['tile'])] * (n_objects - objects_to_take)  # type: ignore
                         )
                         combined_data['known_id'].extend(np.array(f['known_id'])[remaining_mask])
                         combined_data['label'].extend(np.array(f['label'])[remaining_mask])
                         combined_data['zspec'].extend(np.array(f['zspec'])[remaining_mask])
 
-                        object_counter += n_objects - objects_to_take
+                        object_counter += n_objects - objects_to_take  # type: ignore
 
         except Exception as e:
             logger.error(f'Error processing {input_file}: {e}')
@@ -241,7 +241,7 @@ if __name__ == '__main__':
     table_path = os.path.join(tables, tile_df_file)
     tile_df = pd.read_csv(table_path)
     # unique tiles
-    tiles = np.unique(tile_df['tile'].values)
+    tiles = np.unique(tile_df['tile'].values)  # type: ignore
     # format tile list
     tiles = transform_list(tiles)
     # select input tiles from full tile list

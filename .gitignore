@@ -18,3 +18,15 @@ tables/all_desi_unions_matched.csv
 notebooks/inference.ipynb
 inference-checkpoint.ipynb
 test_output/
+credentials*
+tables/dwarfs_gri_w_group_flag.csv
+tables/elves_host_info.csv
+tables/fifty_mpc_catalog.fits
+tables/fifty_mpc_catalog_short.fits
+tables/HECATE_v1.1.fits
+tables/*checkpoint*
+tables/matlas_host_info.csv
+tables/tiles_gri_w_group_flag.csv
+data_cutouts_gri/
+train_cutouts_gri/
+data_cutouts_r/

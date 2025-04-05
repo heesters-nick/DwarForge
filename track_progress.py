@@ -180,7 +180,7 @@ def get_unprocessed_jobs(
 
         # Process only tiles near massive galaxies?
         if process_groups:
-            group_tiles_df = pd.read_csv(group_tiles)
+            group_tiles_df = pd.read_csv(group_tiles)  # type: ignore
             group_tile_nums = [ast.literal_eval(tile) for tile in group_tiles_df['tile'].values]
             tiles_to_process = [tile for tile in tiles_to_process if tile in group_tile_nums]
 
@@ -528,13 +528,13 @@ class MonitoredQueue:
         return self.qsize() == 0
 
     def full(self):
-        return self.qsize() == self.queue._maxsize
+        return self.qsize() == self.queue._maxsize  # type: ignore
 
     def task_done(self):
-        self.queue.task_done()
+        self.queue.task_done()  # type: ignore
 
     def join(self):
-        self.queue.join()
+        self.queue.join()  # type: ignore
 
 
 def periodic_queue_check(download_queue, process_queue, shutdown_flag):

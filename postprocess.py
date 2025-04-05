@@ -59,15 +59,15 @@ def match_stars(
         bright_stars = df_label[df_label['Gmag'] < mag_limit].reset_index(drop=True)
 
         # Create a mask for all bright stars at once using cv2.circle
-        h, w = segmap.shape
+        h, w = segmap.shape  # type: ignore
         all_stars_mask = np.zeros((h, w), dtype=np.uint8)
         for x, y in bright_stars[['x', 'y']].values:
             x, y = round(x), round(y)
             if 0 <= x < w and 0 <= y < h:
-                cv2.circle(all_stars_mask, (x, y), round(extended_flag_radius), 1, -1)
+                cv2.circle(all_stars_mask, (x, y), round(extended_flag_radius), 1, -1)  # type: ignore
 
         # Find all segment IDs within the masked area
-        segment_ids = np.unique(segmap[all_stars_mask > 0])[1:]  # exclude 0 (background)
+        segment_ids = np.unique(segmap[all_stars_mask > 0])[1:]  # type: ignore # exclude 0 (background)
 
         extended_flag_idx = (
             segment_ids - 1
@@ -99,7 +99,7 @@ def match_cats(df_det, df_label, tile, pixel_scale, max_sep=15.0, re_multiplier=
     potential_matches_df = pd.DataFrame()
     for idx, known in df_label.iterrows():
         known_coords = SkyCoord(known['ra'], known['dec'], unit='deg')
-        known_coords_xyz = known_coords.cartesian.xyz.value
+        known_coords_xyz = known_coords.cartesian.xyz.value  # type: ignore
 
         # Calculate base search radius in degrees
         base_search_radius = max_sep / 3600  # Convert arcseconds to degrees
@@ -118,7 +118,7 @@ def match_cats(df_det, df_label, tile, pixel_scale, max_sep=15.0, re_multiplier=
 
         search_radius_chord = 2 * np.sin(np.deg2rad(search_radius) / 2)
 
-        potential_match_indices = tree.query_ball_point(known_coords_xyz, search_radius_chord)
+        potential_match_indices = tree.query_ball_point(known_coords_xyz, search_radius_chord)  # type: ignore
         potential_matches = df_det.iloc[potential_match_indices]
 
         logger.debug(f'potential matches for {known["ID"]}: {len(potential_matches)}')
@@ -135,10 +135,8 @@ def match_cats(df_det, df_label, tile, pixel_scale, max_sep=15.0, re_multiplier=
             for i, det in potential_matches.iterrows():
                 size_score = np.log1p(det['n_pix']) / np.log1p(max_n_pix)
                 lsb_score = det['mu'] / max_mu
-                distance = distances[potential_matches.index.get_loc(i)]
-                distance_score = 1 - (
-                    distance / (3600 * search_radius)
-                )  # Normalized distance score
+                distance = distances[potential_matches.index.get_loc(i)]  # type: ignore
+                distance_score = 1 - (distance / (3600 * search_radius))  # type: ignore # Normalized distance score
                 score = lsb_score * 0.2 + size_score * 0.4 + distance_score * 0.4
                 logger.debug(
                     f'object: {det["ID"]}; lsb score: {lsb_score:.2f}, size score: {size_score:.2f}, distance score: {distance_score:.2f}'
@@ -670,7 +668,7 @@ def match_coordinates_across_bands(
 
         # Create row with NaN defaults
         row = {col: np.nan for col in columns}
-        row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})
+        row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})  # type: ignore
 
         # Fill common columns from primary band
         primary_df = dfs[valid_bands.index(primary_band)].iloc[band_indices[primary_band]]
@@ -868,7 +866,7 @@ def match_coordinates_across_bands_keep_lsb(
 
         # Create row with NaN defaults
         row = {col: np.nan for col in columns}
-        row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})
+        row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})  # type: ignore
 
         # Fill common columns from primary band
         primary_df = dfs[valid_bands.index(primary_band)].iloc[band_indices[primary_band]]
@@ -912,7 +910,7 @@ def read_band_data(parent_dir, tile_dir, tile, band, in_dict, seg_mode, use_full
         data, header = open_raw_data(data_path, fits_ext=fits_ext, band=band)
     else:
         data_path = os.path.join(
-            parent_dir, tile_dir, band, os.path.splitext(filename_prefix) + '_rebin.fits'
+            parent_dir, tile_dir, band, os.path.splitext(filename_prefix)[0] + '_rebin.fits'
         )
         data, header = open_fits(data_path, fits_ext=0)
 
@@ -930,7 +928,7 @@ def read_band_data(parent_dir, tile_dir, tile, band, in_dict, seg_mode, use_full
     if len(det_path) == 0:
         logger.info(f'Tile {tile}: detection catalog not found for band {band}.')
         return data, header, segmap, np.zeros(1), np.zeros(1), pd.DataFrame()
-    det_df = pd.read_parquet(det_path)
+    det_df = pd.read_parquet(det_path[0])
     # filter det_df for each band before performing matching
     # exclude likely non-dwarfs beforehand
     if 'lsb' not in det_df.columns:
@@ -945,7 +943,7 @@ def read_band_data(parent_dir, tile_dir, tile, band, in_dict, seg_mode, use_full
         det_df = pd.concat([det_df, det_df_dwarf], ignore_index=True)
         det_df = det_df.sort_values('ID')  # keep original order
 
-    return data, header, segmap, det_df['ra'].values, det_df['dec'].values, det_df
+    return data, header, segmap, det_df['ra'].values, det_df['dec'].values, det_df  # type: ignore
 
 
 def filter_candidates(df, tile, band):

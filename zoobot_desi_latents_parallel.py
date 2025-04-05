@@ -173,18 +173,18 @@ def generate_rgb(
         # Apply gamma correction while preserving sign
         if gamma is not None:
             if not red_is_zero:
-                red_mask = abs(red) <= 1e-9
-                red = np.sign(red) * (abs(red) ** gamma)
+                red_mask = abs(red) <= 1e-9  # type: ignore
+                red = np.sign(red) * (abs(red) ** gamma)  # type: ignore
                 red[red_mask] = 0
 
             if not green_is_zero:
-                green_mask = abs(green) <= 1e-9
-                green = np.sign(green) * (abs(green) ** gamma)
+                green_mask = abs(green) <= 1e-9  # type: ignore
+                green = np.sign(green) * (abs(green) ** gamma)  # type: ignore
                 green[green_mask] = 0
 
             if not blue_is_zero:
-                blue_mask = abs(blue) <= 1e-9
-                blue = np.sign(blue) * (abs(blue) ** gamma)
+                blue_mask = abs(blue) <= 1e-9  # type: ignore
+                blue = np.sign(blue) * (abs(blue) ** gamma)  # type: ignore
                 blue[blue_mask] = 0
         # Stack the channels after scaling and gamma correction
         result = np.stack([red, green, blue], axis=-1).astype(np.float32)
@@ -449,13 +449,13 @@ def process_single_tile(args):
                 objects_not_found_in_tile = num_targets_in_catalog
                 raise FileNotFoundError(f"'unique_id' not found in {tile_path}")
 
-            h5_unique_ids = src_file['unique_id'][:]
-            if h5_unique_ids.ndim == 0:
+            h5_unique_ids = src_file['unique_id'][:]  # type: ignore
+            if h5_unique_ids.ndim == 0:  # type: ignore
                 h5_unique_ids = np.array([h5_unique_ids])
-            if h5_unique_ids.ndim > 1:
-                h5_unique_ids = h5_unique_ids.flatten()
+            if h5_unique_ids.ndim > 1:  # type: ignore
+                h5_unique_ids = h5_unique_ids.flatten()  # type: ignore
 
-            h5_id_to_index = {uid: idx for idx, uid in enumerate(h5_unique_ids)}
+            h5_id_to_index = {uid: idx for idx, uid in enumerate(h5_unique_ids)}  # type: ignore
             valid_indices: List[int] = []
             catalog_indices_to_keep: List[int] = []
 
@@ -483,18 +483,18 @@ def process_single_tile(args):
                     objects_not_found_in_tile += n_valid  # Count these as not found
                     raise FileNotFoundError(f"'images' not found in {tile_path}")
 
-                images = src_file['images'][sorted_h5_indices]
+                images = src_file['images'][sorted_h5_indices]  # type: ignore
 
                 # 4. Preprocess images for this tile
                 preprocessed_images = np.zeros(
-                    (n_valid, 3, images.shape[-2], images.shape[-1]),
+                    (n_valid, 3, images.shape[-2], images.shape[-1]),  # type: ignore
                     dtype=np.float32,
                 )
                 for i in range(n_valid):
-                    cutout = images[i]
+                    cutout = images[i]  # type: ignore
                     # Assuming preprocess_cutout and generate_rgb are defined globally
                     preprocessed = preprocess_cutout(
-                        cutout,
+                        cutout,  # type: ignore
                         mode=preprocessing_params['mode'],
                         replace_anomaly=preprocessing_params['replace_anomaly'],
                     )

@@ -41,7 +41,11 @@ def remove_background(
     sigma_clip = SigmaClip(sigma=3.0)
     bkg_estimator = estimator
     bkg = Background2D(
-        image, (bw, bh), filter_size=(3, 3), sigma_clip=sigma_clip, bkg_estimator=bkg_estimator
+        image,
+        (bw, bh),
+        filter_size=(3, 3),
+        sigma_clip=sigma_clip,
+        bkg_estimator=bkg_estimator,  # type: ignore
     )
     # non-zero mask
     mask = image > 0
@@ -140,11 +144,11 @@ def replace_with_local_background(
         cv2.drawMarker(
             spike_mask,
             (x, y),
-            color=255,
+            color=255,  # type: ignore
             markerType=cv2.MARKER_CROSS,
             markerSize=spike_len,
             thickness=spike_thick,
-        )
+        )  # type: ignore
         mask[spike_mask > 0] = 0
 
         return mask
@@ -164,7 +168,7 @@ def replace_with_local_background(
         local_object_df,
     ):
         star_region = np.zeros_like(local_region, dtype=np.uint8)
-        cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)
+        cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)  # type: ignore
 
         # Create a mask of non-star objects
         non_star_mask = np.zeros_like(local_segmap, dtype=bool)
@@ -196,11 +200,11 @@ def replace_with_local_background(
             cv2.drawMarker(
                 star_region,
                 (local_x, local_y),
-                color=255,
+                color=255,  # type: ignore
                 markerType=cv2.MARKER_CROSS,
                 markerSize=spike_len,
                 thickness=spike_thick,
-            )
+            )  # type: ignore
 
         return star_region, bg_segments
 
@@ -254,17 +258,22 @@ def replace_with_local_background(
 
         star_region_reduced = np.zeros_like(local_region, dtype=np.uint8)
         cv2.circle(
-            star_region_reduced, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA
-        )
+            star_region_reduced,
+            (local_x, local_y),
+            r_reduced,
+            255,  # type: ignore
+            -1,
+            lineType=cv2.LINE_AA,  # type: ignore
+        )  # type: ignore
         if spike_len > 0:
             cv2.drawMarker(
                 star_region_reduced,
                 (local_x, local_y),
-                color=255,
+                color=255,  # type: ignore
                 markerType=cv2.MARKER_CROSS,
                 markerSize=l_reduced,
                 thickness=spike_thick,
-            )
+            )  # type: ignore
 
         inner_r_bg = r_reduced
         outer_r_bg = r_reduced + 3
@@ -298,8 +307,13 @@ def replace_with_local_background(
         if is_bright_star:
             star_region = np.zeros_like(local_region, dtype=np.uint8)
             cv2.circle(
-                star_region, (local_x, local_y), round(r_sep * 2.5), 255, -1, lineType=cv2.LINE_AA
-            )
+                star_region,
+                (local_x, local_y),
+                round(r_sep * 2.5),
+                255,  # type: ignore
+                -1,
+                lineType=cv2.LINE_AA,
+            )  # type: ignore
             star_region = binary_dilation(star_region, iterations=1).astype(np.uint8)
 
             # Remove non-star objects from the star region
@@ -330,7 +344,7 @@ def replace_with_local_background(
         elif is_bright_star and star_case in ['not_deblended']:
             r_reduced = max(round(r * 0.3), 1)
             star_region = np.zeros_like(local_region, dtype=np.uint8)
-            cv2.circle(star_region, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA)
+            cv2.circle(star_region, (local_x, local_y), r_reduced, 255, -1, lineType=cv2.LINE_AA)  # type: ignore
 
             inner_r_bg = r_reduced
             outer_r_bg = r_reduced + 3
@@ -356,7 +370,7 @@ def replace_with_local_background(
             bg_segments[star_region] = 0
         elif not is_bright_star and star_case in ['not_deblended']:
             star_region = np.zeros_like(local_region, dtype=np.uint8)
-            cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)
+            cv2.circle(star_region, (local_x, local_y), r, 255, -1, lineType=cv2.LINE_AA)  # type: ignore
 
             inner_r_bg = r
             outer_r_bg = r + 3
@@ -440,11 +454,11 @@ def replace_with_local_background(
                     cv2.drawMarker(
                         star_region,
                         (local_x, local_y),
-                        color=255,
+                        color=255,  # type: ignore
                         markerType=cv2.MARKER_CROSS,
                         markerSize=spike_len,
                         thickness=spike_thick,
-                    )
+                    )  # type: ignore
                 bg_segments = np.zeros_like(star_region)
             elif star_case == 'embedded':
                 star_region, bg_segments = process_embedded(
@@ -515,7 +529,7 @@ def replace_with_local_background(
             if star_case in ['embedded', 'not_deblended']:
                 random_values = generate_positive_trunc_normal(bg_data, median, std, num_pixels)
             else:
-                random_values = np.random.normal(median, min(std, 3), num_pixels)
+                random_values = np.random.normal(median, min(std, 3), num_pixels)  # type: ignore
 
             local_region[star_region > 0] = random_values
         else:  # Use background grid for other cases in non-cfis_lsb-r bands
@@ -576,16 +590,16 @@ def find_stars(tile, header):
 
     logger.debug(f'Querying Gaia for tile {tile}..')
     star_df = query_gaia_stars(tile_coord, search_radius)
-    star_df.dropna(inplace=True)
-    if star_df.empty:
+    star_df.dropna(inplace=True)  # type: ignore
+    if star_df.empty:  # type: ignore
         logger.info(f'No stars found in tile {tile}.')
         return star_df
-    c_star = SkyCoord(ra=star_df.ra, dec=star_df.dec, unit='deg', frame='icrs')
+    c_star = SkyCoord(ra=star_df.ra, dec=star_df.dec, unit='deg', frame='icrs')  # type: ignore
     x_star, y_star = wcs.world_to_pixel(c_star)
 
     mask = (0 < x_star) & (x_star < tile_width) & (0 < y_star) & (y_star < tile_height)
 
-    star_df = star_df[mask].reset_index(drop=True)
+    star_df = star_df[mask].reset_index(drop=True)  # type: ignore
     star_df['x'], star_df['y'] = x_star[mask], y_star[mask]
     logger.debug(f'{len(star_df)} stars found in tile {tile}.')
 
@@ -598,7 +612,7 @@ def star_fit(df_if, survey='UNIONS'):
     if survey == 'UNIONS':
         param_s = np.array([7.21366775e05, 6.13780414e-01, 1.26614049e02, 8.26137977e05])
         break_point_s = 9.49
-        df['A'] = piecewise_function_with_break_global(np.array(df.Gmag), *param_s, break_point_s)
+        df['A'] = piecewise_function_with_break_global(np.array(df.Gmag), *param_s, break_point_s)  # type: ignore
         df['R_ISO'] = np.sqrt(df.A / np.pi)
     if survey == 'DECALS':
         param_s = np.array([1.40400983e-02, 4.94599527e00, -2.24130151e02])
@@ -608,7 +622,7 @@ def star_fit(df_if, survey='UNIONS'):
     # fit length of diffraction spikes
     param_l = np.array([1.36306644e03, 3.45428885e-01, 3.30158864e00, 1.09029943e03])
     break_point_l = 15.29
-    df['diffs_len_fit'] = piecewise_function_with_break_global(df['Gmag'], *param_l, break_point_l)
+    df['diffs_len_fit'] = piecewise_function_with_break_global(df['Gmag'], *param_l, break_point_l)  # type: ignore
 
     # fit thickness of diffraction spikes
     param_t = np.array([15.6, -0.5, -0.05, 1.5])
@@ -664,7 +678,7 @@ def mask_stars(
     for _, star in bright_star_df.iterrows():
         x, y = round(star.x), round(star.y)
         r = max(round(star.R_ISO * r_scale), 1)
-        cv2.circle(bright_star_mask, (x, y), round(0.6 * r), 255, -1, lineType=cv2.LINE_AA)
+        cv2.circle(bright_star_mask, (x, y), round(0.6 * r), 255, -1, lineType=cv2.LINE_AA)  # type: ignore
         # Add diffraction spikes for bright stars
         spike_len = round(star.diffs_len_fit * l_scale)
         spike_thick = round(star.diffs_thick_fit * 5.0)
@@ -672,11 +686,11 @@ def mask_stars(
         cv2.drawMarker(
             bright_star_mask,
             (x, y),
-            color=255,
+            color=255,  # type: ignore
             markerType=cv2.MARKER_CROSS,
             markerSize=round(0.8 * spike_len),
             thickness=round(0.9 * spike_thick),
-        )
+        )  # type: ignore
 
     data, replaced_star_mask, visualization_mask, star_case_df, vis_mask_border = (
         replace_with_local_background(
@@ -939,7 +953,7 @@ def mask_hot_pixels(
     neighbor_threshold = bkg.background_median + sigma * bkg.background_rms_median
 
     # Label connected regions
-    labeled, num_features = ndimage.label(hot_pixels)
+    labeled, num_features = ndimage.label(hot_pixels)  # type: ignore
 
     # Get the size of each labeled region
     sizes = np.bincount(labeled.ravel())
@@ -949,7 +963,7 @@ def mask_hot_pixels(
     mask_size[0] = 0  # Remove background
 
     # Apply the size mask to the labeled image
-    potential_hot_pixels = mask_size[labeled]
+    potential_hot_pixels = mask_size[labeled]  # type: ignore
 
     # Create a structure for dilation (3x3 square)
     structure = np.ones((3, 3), dtype=bool)
@@ -985,7 +999,7 @@ def mask_hot_pixels(
     # Create a mask for hot pixels based on the ratio
     hot_pixel_mask = np.zeros_like(image, dtype=bool)
     hot_pixel_mask[potential_hot_pixels] = (
-        below_threshold_ratio[labeled[potential_hot_pixels] - 1] >= neighbor_ratio
+        below_threshold_ratio[labeled[potential_hot_pixels] - 1] >= neighbor_ratio  # type: ignore
     )
 
     # Create a copy of the image and mask the hot pixels
@@ -1067,7 +1081,7 @@ def prep_tile(tile, file_path, fits_ext, zp, band, bin_size=4):
     # find stars in the image from gaia
     star_df = find_stars(tile_str(tile), header_binned)
     # sort df to mask dim stars first, overlapping bright stars will mask over them, leaving a smoother image
-    sorted_star_df = star_df.sort_values(by='Gmag', ascending=False)
+    sorted_star_df = star_df.sort_values(by='Gmag', ascending=False)  # type: ignore
     # detect objects using SEP
     try:
         objects_sep, data_sub_sep, bkg_sep, segmap_sep = source_detection_with_dynamic_limit(
@@ -1284,7 +1298,7 @@ def aperture_photometry_mag_auto(
 def replace_object_pixels(local_region, obj_region, bg_data):
     mean, median, std = sigma_clipped_stats(bg_data, sigma=3.0)
     num_pixels = np.sum(obj_region > 0)
-    random_values = np.random.normal(median, min(std, 3.0), num_pixels)
+    random_values = np.random.normal(median, min(std, 3.0), num_pixels)  # type: ignore
 
     result = local_region.copy()
     result[obj_region > 0] = random_values
@@ -1354,7 +1368,7 @@ def create_background_map(data, segmap, grid_size=25, min_fraction=0.5):
 def fill_invalid_cells_nearest(array):
     mask = np.isnan(array)
     idx = ndimage.distance_transform_edt(mask, return_distances=False, return_indices=True)
-    return array[tuple(idx)]
+    return array[tuple(idx)]  # type: ignore
 
 
 def mask_small_objects(
@@ -1396,7 +1410,7 @@ def mask_small_objects(
     medium_objects_segmap_mask = np.isin(segmap, medium_object_ids)
 
     # Label connected components of very small objects
-    labeled_very_small_objects, _ = label(very_small_objects_segmap_mask)
+    labeled_very_small_objects, _ = label(very_small_objects_segmap_mask)  # type: ignore
 
     # Calculate the size of each connected component
     component_sizes = np.bincount(labeled_very_small_objects.ravel())[1:]
@@ -1496,7 +1510,7 @@ def determine_star_case(
     border_segments_check = np.array([])
     if potentially_not_deblended:
         star_mask_check = np.zeros((h, w), dtype=np.uint8)
-        cv2.circle(star_mask_check, (x, y), r, 1, -1, lineType=cv2.LINE_AA)
+        cv2.circle(star_mask_check, (x, y), r, 1, -1, lineType=cv2.LINE_AA)  # type: ignore
 
         # Dilate the star mask to get its outer edge
         kernel_check = np.ones((3, 3), np.uint8)
@@ -1569,7 +1583,7 @@ def create_ring_mask(
     binary_mask = (segmap > 0).astype(int)
 
     # Label connected components
-    labeled_objects, num_features = ndimage.label(binary_mask)
+    labeled_objects, num_features = ndimage.label(binary_mask)  # type: ignore
 
     # Count pixels in each labeled region
     object_sizes = np.bincount(labeled_objects.ravel())[1:]

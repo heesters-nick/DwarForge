@@ -506,9 +506,9 @@ def combine_h5_files(source_dir, destination_dir, objects_per_file=1000):
                 file_path = os.path.join(root, file)
 
                 with h5py.File(file_path, 'r') as f:
-                    num_objects = f['images'].shape[0]
+                    num_objects = f['images'].shape[0]  # type: ignore
                     for key in combined_data.keys():
-                        combined_data[key].extend(f[key][:])
+                        combined_data[key].extend(f[key][:])  # type: ignore
 
                     object_counter += num_objects
 
@@ -559,9 +559,10 @@ def make_cutouts_for_band(data_path, tile, cut_size, seg_mode):
     path, extension = os.path.splitext(data_path)
     det_pattern = f'{path}*_det_params.parquet'
     det_path = glob.glob(det_pattern)
-    mto_det = pd.read_parquet(det_path)
+    mto_det = pd.read_parquet(det_path[0])
     cutouts, cutouts_seg = make_cutouts(
         binned_data,
+        header=binned_header,
         tile_str=tile_str(tile),
         df=mto_det,
         segmap=segmap,
@@ -624,12 +625,12 @@ def initialize_lsb_file(output_path, band_names, size):
                 if (
                     'images' in f
                     and 'band_names' in f
-                    and len(f['band_names']) == len(band_names)
-                    and f['images'].shape[2:] == (size, size)
+                    and len(f['band_names']) == len(band_names)  # type: ignore
+                    and f['images'].shape[2:] == (size, size)  # type: ignore
                 ):
                     logger.info(
                         f'Using existing LSB accumulation file: {output_path} '
-                        f'with {f["images"].shape[0]} existing objects'
+                        f'with {f["images"].shape[0]} existing objects'  # type: ignore
                     )
                     return
                 else:
@@ -680,7 +681,7 @@ def append_lsb_data(
     with file_lock:
         with h5py.File(lsb_file_path, 'a', libver='latest') as f:
             # Get existing known_ids
-            existing_ids = set([x.decode('utf-8') for x in f['known_id'][:]])
+            existing_ids = set([x.decode('utf-8') for x in f['known_id'][:]])  # type: ignore
 
             # Create mask for new objects
             new_objects_mask = np.array([kid not in existing_ids for kid in known_ids[lsb_mask]])
@@ -700,30 +701,30 @@ def append_lsb_data(
             tiles_to_add = np.tile(tile, (np.sum(new_objects_mask), 1))
 
             # Get current and new sizes
-            current_size = f['images'].shape[0]
+            current_size = f['images'].shape[0]  # type: ignore
             new_size = current_size + len(cutouts_to_add)
 
             # Resize all datasets
-            f['images'].resize(new_size, axis=0)
+            f['images'].resize(new_size, axis=0)  # type: ignore
             if segmaps_to_add is not None:
-                f['segmaps'].resize(new_size, axis=0)
-            f['ra'].resize(new_size, axis=0)
-            f['dec'].resize(new_size, axis=0)
-            f['tile'].resize(new_size, axis=0)
-            f['known_id'].resize(new_size, axis=0)
-            f['label'].resize(new_size, axis=0)
-            f['zspec'].resize(new_size, axis=0)
+                f['segmaps'].resize(new_size, axis=0)  # type: ignore
+            f['ra'].resize(new_size, axis=0)  # type: ignore
+            f['dec'].resize(new_size, axis=0)  # type: ignore
+            f['tile'].resize(new_size, axis=0)  # type: ignore
+            f['known_id'].resize(new_size, axis=0)  # type: ignore
+            f['label'].resize(new_size, axis=0)  # type: ignore
+            f['zspec'].resize(new_size, axis=0)  # type: ignore
 
             # Add new data
-            f['images'][current_size:new_size] = cutouts_to_add
+            f['images'][current_size:new_size] = cutouts_to_add  # type: ignore
             if segmaps_to_add is not None:
-                f['segmaps'][current_size:new_size] = segmaps_to_add
-            f['ra'][current_size:new_size] = ras_to_add
-            f['dec'][current_size:new_size] = decs_to_add
-            f['tile'][current_size:new_size] = tiles_to_add
-            f['known_id'][current_size:new_size] = known_ids_to_add
-            f['label'][current_size:new_size] = labels_to_add
-            f['zspec'][current_size:new_size] = zspecs_to_add
+                f['segmaps'][current_size:new_size] = segmaps_to_add  # type: ignore
+            f['ra'][current_size:new_size] = ras_to_add  # type: ignore
+            f['dec'][current_size:new_size] = decs_to_add  # type: ignore
+            f['tile'][current_size:new_size] = tiles_to_add  # type: ignore
+            f['known_id'][current_size:new_size] = known_ids_to_add  # type: ignore
+            f['label'][current_size:new_size] = labels_to_add  # type: ignore
+            f['zspec'][current_size:new_size] = zspecs_to_add  # type: ignore
 
             logger.info(
                 f'Added {len(cutouts_to_add)} new LSB galaxies from tile {tile} to accumulated file '
@@ -846,7 +847,7 @@ def process_tile(
 
                 final_cutouts[:, i, :, :] = cutouts
                 if seg_mode is not None:
-                    final_segmaps[:, i, :, :] = cutouts_seg
+                    final_segmaps[:, i, :, :] = cutouts_seg  # type: ignore
         except Exception as e:
             logger.error(f'Error in cutout creation: {e}.')
             return 0
@@ -869,7 +870,7 @@ def process_tile(
                 data=cutouts_rgb,
                 batch_size=cutouts_rgb.shape[0],
                 dtype=DTYPE,
-                device=DEVICE,
+                device=DEVICE,  # type: ignore
             )
             logger.debug(
                 f'Inference on {cutouts_rgb.shape[0]} objects took {time.time() - start_inf:.2f} seconds.'
@@ -888,13 +889,13 @@ def process_tile(
             lsb_mask[lsb_indices] = True
             # Convert RA and Dec to Cartesian coordinates
             coords = SkyCoord(ra=final_ras, dec=final_decs, unit='deg')
-            cartesian = coords.cartesian.xyz.value.T
+            cartesian = coords.cartesian.xyz.value.T  # type: ignore
             # Take minimum between n_neighbors+1 and the total number of matched objects to avoid errors
             total_points = len(cartesian)
             k = min(n_neighbors + 1, total_points)
             # Find nearest neighbors for LSB objects
-            tree = cKDTree(cartesian)
-            _, neighbor_indices = tree.query(cartesian[lsb_indices], k=k)
+            tree = cKDTree(cartesian)  # type: ignore
+            _, neighbor_indices = tree.query(cartesian[lsb_indices], k=k)  # type: ignore
 
             # Create mask for neighbor labels
             neighbor_mask = np.zeros_like(labels, dtype=bool)
@@ -1064,8 +1065,8 @@ def process_worker(
     logger.debug(f'Processing worker {worker_id} started')
 
     if inference:
-        model = ZooBot_lightning(**hparams)
-        model.load_state_dict(model_state_dict)
+        model = ZooBot_lightning(**hparams)  # type: ignore
+        model.load_state_dict(model_state_dict)  # type: ignore
         model.freeze()
         model.eval()
         model = model.to(DEVICE)

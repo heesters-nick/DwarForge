@@ -637,6 +637,7 @@ def process_tile_for_band(
                     segmap, header_seg = open_fits(seg_path, fits_ext=0)
                     cutouts, cutouts_seg = make_cutouts(
                         binned_data,
+                        header=prepped_header,
                         tile_str=tile_str(tile),
                         df=mto_det,
                         segmap=segmap,

@@ -270,7 +270,7 @@ def make_cutouts_all_bands(avail, tile, obj_in_tile, download_dir, in_dict, size
         zfill = in_dict[band]['zfill']
         tile_dir = download_dir + f'{str(tile[0]).zfill(zfill)}_{str(tile[1]).zfill(zfill)}'
         tile_fitsfilename = f'{prefix}{delimiter}{str(tile[0]).zfill(zfill)}{delimiter}{str(tile[1]).zfill(zfill)}{suffix}'
-        with fits.open(os.path.join(tile_dir, tile_fitsfilename), memmap=True) as hdul:
+        with fits.open(os.path.join(tile_dir, tile_fitsfilename), memmap=True) as hdul:  # type: ignore
             data = hdul[fits_ext].data  # type: ignore
         for i, (x, y) in enumerate(zip(obj_in_tile.x.values, obj_in_tile.y.values)):
             cutout[i, j] = make_cutout(data, x, y, size)

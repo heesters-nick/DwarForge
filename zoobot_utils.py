@@ -60,9 +60,9 @@ class ZooBot_lightning(pl.LightningModule):
         super(ZooBot_lightning, self).__init__()
         self.save_hyperparameters()  # Saves all arguments for checkpointing
 
-        if self.hparams.loss_type not in ['focal', 'kld']:
+        if self.hparams.loss_type not in ['focal', 'kld']:  # type: ignore
             raise ValueError(
-                f"Invalid loss_type: {self.hparams.loss_type}. Choose 'focal' or 'kld'."
+                f"Invalid loss_type: {self.hparams.loss_type}. Choose 'focal' or 'kld'."  # type: ignore
             )
 
         # Define the model
@@ -93,7 +93,7 @@ class ZooBot_lightning(pl.LightningModule):
         Returns:
             Mean Focal loss for the batch.
         """
-        gamma = self.hparams.focal_gamma
+        gamma = self.hparams.focal_gamma  # type: ignore
         p_pred = probabilities[:, 1]
         p_pred_clamped = p_pred.clamp(min=EPSILON, max=1.0 - EPSILON)
         loss_positive = -targets * torch.pow(1.0 - p_pred, gamma) * torch.log(p_pred_clamped)
@@ -126,19 +126,19 @@ class ZooBot_lightning(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         images, labels = batch
 
-        p_true = self.apply_label_smoothing(labels, alpha=self.hparams.label_smoothing)
+        p_true = self.apply_label_smoothing(labels, alpha=self.hparams.label_smoothing)  # type: ignore
 
         # Get model outputs
         logits = self(images)  # Logits shape [batch, 2]
 
-        if self.hparams.loss_type == 'focal':
+        if self.hparams.loss_type == 'focal':  # type: ignore
             probabilities = F.softmax(logits, dim=1)
             loss = self._compute_focal_loss(probabilities, p_true)
-        elif self.hparams.loss_type == 'kld':
+        elif self.hparams.loss_type == 'kld':  # type: ignore
             loss = self._compute_kld_loss(logits, p_true)
         else:
             # This should not happen due to check in __init__ but good practice
-            raise ValueError(f'Invalid loss_type specified: {self.hparams.loss_type}')
+            raise ValueError(f'Invalid loss_type specified: {self.hparams.loss_type}')  # type: ignore
 
         self.train_step_outputs.append(loss)
         return loss
@@ -210,14 +210,14 @@ class ZooBot_lightning(pl.LightningModule):
         positive_class_probs = probabilities[:, 1]  # Dwarf probability
 
         # 1. Calculate the loss
-        if self.hparams.loss_type == 'focal':
+        if self.hparams.loss_type == 'focal':  # type: ignore
             # Use original labels (not smoothed) for validation loss
             val_loss = self._compute_focal_loss(probabilities, labels)
-        elif self.hparams.loss_type == 'kld':
+        elif self.hparams.loss_type == 'kld':  # type: ignore
             # Use original labels (not smoothed) for validation loss
             val_loss = self._compute_kld_loss(logits, labels)
         else:
-            raise ValueError(f'Invalid loss_type specified: {self.hparams.loss_type}')
+            raise ValueError(f'Invalid loss_type specified: {self.hparams.loss_type}')  # type: ignore
 
         # 2. Brier Score (MSE)
         brier_score = F.mse_loss(positive_class_probs, labels)
@@ -239,7 +239,7 @@ class ZooBot_lightning(pl.LightningModule):
         # Log all metrics
         self.log_dict(
             {
-                'valid_loss': val_loss,
+                'valid_loss': val_loss,  # type: ignore
                 'val_brier': brier_score,
                 'val_calibration': ece,
             },
@@ -275,7 +275,7 @@ class ZooBot_lightning(pl.LightningModule):
         plt.xlabel('Expert Classifications')
         plt.title('Prediction vs Truth Distribution')
         plt.tight_layout()
-        self.logger.experiment.log({'Prediction Distribution': wandb.Image(fig1)})
+        self.logger.experiment.log({'Prediction Distribution': wandb.Image(fig1)})  # type: ignore
         plt.close(fig1)
 
         # 2. Reliability (Calibration) Curve
@@ -335,7 +335,7 @@ class ZooBot_lightning(pl.LightningModule):
         plt.xlim([-0.05, 1.05])  # Add padding
         plt.ylim([-0.05, 1.05])
         plt.tight_layout()
-        self.logger.experiment.log({'Reliability Curve': wandb.Image(fig2)})
+        self.logger.experiment.log({'Reliability Curve': wandb.Image(fig2)})  # type: ignore
         plt.close(fig2)
 
         if hasattr(self, 'bin_data') and self.bin_data:
@@ -406,7 +406,7 @@ class ZooBot_lightning(pl.LightningModule):
             plt.legend()
             plt.grid(True, axis='y', linestyle='--', alpha=0.6)
             plt.tight_layout()
-            self.logger.experiment.log({'Calibration': wandb.Image(fig3)})
+            self.logger.experiment.log({'Calibration': wandb.Image(fig3)})  # type: ignore
             plt.close(fig3)
 
         # 3. Error Distribution
@@ -417,7 +417,7 @@ class ZooBot_lightning(pl.LightningModule):
         plt.ylabel('Density')
         plt.title('Error Distribution')
         plt.tight_layout()
-        self.logger.experiment.log({'Error Distribution': wandb.Image(fig4)})
+        self.logger.experiment.log({'Error Distribution': wandb.Image(fig4)})  # type: ignore
         plt.close(fig4)
 
         # Clear stored data
@@ -434,11 +434,11 @@ class ZooBot_lightning(pl.LightningModule):
         """
         # Retrieve hyperparameters
         try:
-            lr = self.hparams.learning_rate
-            lr_decay_factor = self.hparams.learning_decay
-            num_blocks_to_tune = self.hparams.zoobot_blocks
+            lr = self.hparams.learning_rate  # type: ignore
+            lr_decay_factor = self.hparams.learning_decay  # type: ignore
+            num_blocks_to_tune = self.hparams.zoobot_blocks  # type: ignore
             # Use weight_decay from hparams
-            weight_decay = self.hparams.weight_decay
+            weight_decay = self.hparams.weight_decay  # type: ignore
         except AttributeError as e:
             logger.error(
                 f'Optimizer config failed: Missing hyperparameter. Ensure learning_rate, learning_decay, zoobot_blocks, (and optionally weight_decay) are saved. Error: {e}'
@@ -592,7 +592,7 @@ def get_dwarf_predictions(model, data, batch_size=128, dtype=torch.float32, devi
     predictions = []
 
     # Create dataloader for batched inference
-    dataset = SimpleDataset(data, np.zeros(len(data)))  # Dummy labels
+    dataset = SimpleDataset(data, np.zeros(len(data)))  # Dummy labels # type: ignore
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     with torch.no_grad():
