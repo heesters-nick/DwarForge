@@ -17,3 +17,4 @@ desi/
 tables/all_desi_unions_matched.csv
 notebooks/inference.ipynb
 inference-checkpoint.ipynb
+test_output/

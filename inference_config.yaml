@@ -1,0 +1,36 @@
+# Base directory containing all tile subdirectories
+base_dir: "/arc/projects/unions/ssl/data/raw/tiles/dwarforge"
+
+# List of model checkpoint paths
+model_paths:
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_0/best_model-epoch=07-valid_loss=0.0312.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_1/best_model-epoch=39-valid_loss=0.0322.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_2/best_model-epoch=14-valid_loss=0.0378.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_3/best_model-epoch=75-valid_loss=0.0292.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_4/best_model-epoch=14-valid_loss=0.0272.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_5/best_model-epoch=19-valid_loss=0.0244.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_6/best_model-epoch=33-valid_loss=0.0425.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_7/best_model-epoch=21-valid_loss=0.0315.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_8/best_model-epoch=45-valid_loss=0.0265.ckpt"
+  - "/arc/home/heestersnick/dwarforge/models/kfold/fold_9/best_model-epoch=41-valid_loss=0.0266.ckpt"
+
+# Number of worker processes to use
+# If null, will use CPU count - 1
+num_workers: 5
+
+# Batch size for inference
+inference_batch_size: 64
+
+# Batch size for preprocessing (to manage memory)
+process_batch_size: 150
+
+# Logging configuration
+log_dir: "./logs"
+log_name: "inference_v2"
+log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# Set to true to resume processing from failed_tiles.txt
+resume: false
+
+# Test mode - set to true to run on only 10 tiles and save to separate files
+test_mode: false

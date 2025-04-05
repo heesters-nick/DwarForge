@@ -205,7 +205,7 @@ def preprocess_cutout(
     Q=7,
     stretch=0.008,
     gamma=0.25,
-    mode='training',
+    mode='vis',
     with_desaturation=False,
 ):
     """
