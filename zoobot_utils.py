@@ -663,34 +663,52 @@ def load_models(model_paths):
     return models
 
 
-def ensemble_predict(models, preprocessed_images, batch_size=64):
+def ensemble_predict(models, preprocessed_images, batch_size=64, device=None):
     """
     Runs inference using an ensemble of models and returns the average prediction.
+    Optimized for both CPU and GPU processing.
 
     Args:
         models (list): List of loaded models
         preprocessed_images (np.ndarray): Batch of preprocessed images to predict on
         batch_size (int): Batch size for inference
+        device (torch.device, optional): Device to run inference on. If None, uses current model device.
 
     Returns:
         np.ndarray: Array of mean predictions
     """
+    # Determine the device to use
+    if device is None:
+        # Use the device of the first model if not specified
+        device = next(models[0].parameters()).device
+
+    # Configure DataLoader based on device
+    pin_memory = device.type == 'cuda'
+
     # Create dataset and dataloader
     dataset = SimpleDataset(np.array(preprocessed_images))
     dataloader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,  # Keep at 0 for multiprocessing compatibility
+        pin_memory=pin_memory,
     )
 
     # Initialize predictions array for each model
     all_model_predictions = []
 
     # Get predictions from each model
-    for model in models:
+    for model_idx, model in enumerate(models):
+        # Ensure model is on the correct device
+        model = model.to(device)
+
         model_predictions = []
 
         with torch.no_grad():
             for batch in dataloader:
-                batch = batch.to(DEVICE)
+                # Move batch to the same device as the model
+                batch = batch.to(device)
 
                 # Forward pass
                 logits = model(batch)
@@ -698,7 +716,7 @@ def ensemble_predict(models, preprocessed_images, batch_size=64):
                 # Get probabilities for the positive class
                 probs = F.softmax(logits, dim=1)[:, 1]
 
-                # Store predictions
+                # Move predictions back to CPU for aggregation
                 model_predictions.extend(probs.cpu().numpy())
 
         all_model_predictions.append(model_predictions)
@@ -706,5 +724,9 @@ def ensemble_predict(models, preprocessed_images, batch_size=64):
     # Stack predictions and calculate mean across models
     all_preds = np.array(all_model_predictions)
     ensemble_predictions = np.mean(all_preds, axis=0)
+
+    # Clear GPU cache if using CUDA to prevent memory leaks in loops
+    if device.type == 'cuda' and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return ensemble_predictions
