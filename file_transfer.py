@@ -267,7 +267,7 @@ if __name__ == '__main__':
             source_path=source_directory,
             folder_id=folder_id,
             max_workers=5,
-            file_pattern='*prep.h5',
+            file_pattern='*prep_v1.h5',
         )
     except Exception as e:
         logger.error(f'An error occurred: {str(e)}')

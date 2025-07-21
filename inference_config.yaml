@@ -19,24 +19,24 @@ model_paths:
   - "/arc/home/heestersnick/dwarforge/models/kfold/fold_9/best_model-epoch=41-valid_loss=0.0266.ckpt"
 
 # Processing mode: "cpu" or "gpu"
-processing_mode: "gpu"
+processing_mode: "cpu"
 
 # CPU mode settings
 cpu:
   # Number of worker processes to use
   # If null, will use CPU count - 1
-  num_workers: 15
-  
-  # Batch size for inference
-  batch_size: 64
+  num_workers: 1
   
   # Batch size for preprocessing (to manage memory)
   process_batch_size: 150
+  
+  # Batch size for inference
+  inference_batch_size: 150
 
 # GPU mode settings
 gpu:
   # Number of CPU processes for preprocessing
-  preprocessing_workers: 4
+  preprocessing_workers: 2
   
   # Number of CPU processes for writing results
   writer_workers: 2
@@ -48,12 +48,15 @@ gpu:
   process_batch_size: 150
   
   # Size of communication queues
-  queue_size: 50
+  queue_size: 10
 
 # Logging configuration
 log_dir: "./logs"
-log_name: "inference"
+log_name: "inference_ensemble_missing"
 log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# Process custom tiles, put None if all should be processed
+input_tiles: tables/missing_tiles2.txt
 
 # Set to true to resume processing from failed_tiles.txt
 resume: false

@@ -1,6 +1,7 @@
 import glob
 import os
 import time
+from collections import defaultdict
 
 import cv2
 import h5py
@@ -15,6 +16,7 @@ from utils import (
     check_corrupted_data,
     check_objects_in_neighboring_tiles,
     create_cartesian_kdtree,
+    get_coord_median,
     open_fits,
     open_raw_data,
     read_parquet,
@@ -524,22 +526,397 @@ def match_coordinates(band1, band2, band_data, max_sep=15.0):
     return np.where(mask)[0], idx[mask]
 
 
+# def match_coordinates_across_bands(
+#     band_data: dict, max_sep: float = 10.0, band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i']
+# ) -> pd.DataFrame:
+#     """
+#     Cross-match detections across bands and merge photometric properties.
+#     Handles cases where bands may be missing or empty.
+
+#     Args:
+#         band_data: Dictionary containing data for each band
+#         max_sep: Maximum separation in arcseconds for matching
+#         band_priority: List of bands in order of priority for coordinate selection
+
+#     Returns:
+#         DataFrame with matches present in at least 2 bands, or empty DataFrame if insufficient data
+#     """
+#     # Define column structure upfront
+#     band_specific_cols = [
+#         'ID',
+#         'X',
+#         'Y',
+#         'A',
+#         'B',
+#         'theta',
+#         'total_flux',
+#         'mu_max',
+#         'mu_median',
+#         'mu_mean',
+#         'R_fwhm',
+#         'R_e',
+#         'R10',
+#         'R25',
+#         'R75',
+#         'R90',
+#         'R100',
+#         'n_pix',
+#         'ra',
+#         'dec',
+#         're_arcsec',
+#         'r_fwhm_arcsec',
+#         'r_10_arcsec',
+#         'r_25_arcsec',
+#         'r_75_arcsec',
+#         'r_90_arcsec',
+#         'r_100_arcsec',
+#         'A_arcsec',
+#         'B_arcsec',
+#         'axis_ratio',
+#         'mag',
+#         'mu',
+#     ]
+#     common_cols = ['class_label', 'zspec', 'lsb', 'ID_known']
+#     columns = ['ra', 'dec'] + common_cols
+#     for band in band_priority:
+#         columns.extend(f'{col}_{band}' for col in band_specific_cols)
+
+#     # Collect valid bands and their data
+#     valid_bands = []
+#     all_coords = []
+#     bands_list = []
+#     orig_indices = []
+#     dfs = []
+
+#     for band in band_priority:
+#         # Skip if band is missing or empty
+#         if (
+#             band not in band_data
+#             or band_data[band] is None
+#             or 'ra' not in band_data[band]
+#             or 'dec' not in band_data[band]
+#             or len(band_data[band]['ra']) == 0
+#         ):
+#             continue
+
+#         data = band_data[band]
+#         coords = SkyCoord(ra=data['ra'] * u.deg, dec=data['dec'] * u.deg)
+
+#         valid_bands.append(band)
+#         all_coords.append(coords)
+#         bands_list.extend([band] * len(coords))
+#         orig_indices.append(np.arange(len(coords)))
+#         dfs.append(data['df'])
+
+#     # Return empty DataFrame if we don't have at least 2 valid bands
+#     if len(valid_bands) < 2:
+#         return pd.DataFrame(columns=['unique_id'] + columns)
+
+#     # Combine coordinates and find matches
+#     combined_coords = concatenate(all_coords)
+#     idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)
+
+#     # Filter matches to only include different bands
+#     mask = (idx1 < idx2) & (np.array([bands_list[i] != bands_list[j] for i, j in zip(idx1, idx2)]))
+#     idx1, idx2 = idx1[mask], idx2[mask]
+
+#     # Union-Find for grouping
+#     parent = list(range(len(combined_coords)))
+
+#     def find(u):
+#         while parent[u] != u:
+#             parent[u] = parent[parent[u]]
+#             u = parent[u]
+#         return u
+
+#     def union(u, v):
+#         pu, pv = find(u), find(v)
+#         if pu != pv:
+#             parent[pv] = pu
+
+#     # Group matching detections
+#     for i, j in zip(idx1, idx2):
+#         union(i, j)
+
+#     # Collect groups and their members
+#     groups = {}
+#     for idx in range(len(combined_coords)):
+#         root = find(idx)
+#         if root not in groups:
+#             groups[root] = set()
+#         groups[root].add(idx)
+
+#     # Build output DataFrame
+#     rows = []
+#     for group in groups.values():
+#         # Only keep groups with matches in at least 2 bands
+#         group_bands = {bands_list[idx] for idx in group}
+#         if len(group_bands) < 2:
+#             continue
+
+#         # Select primary band coordinates based on priority
+#         primary_band = next((b for b in band_priority if b in group_bands), None)
+#         primary_idx = next(idx for idx in group if bands_list[idx] == primary_band)
+#         primary_coord = combined_coords[primary_idx]
+
+#         # Map indices back to original dataframes
+#         band_indices = {}
+#         for idx in group:
+#             band = bands_list[idx]
+#             band_idx = valid_bands.index(band)
+#             offset = sum(len(c) for c in all_coords[:band_idx])
+#             orig_idx = orig_indices[band_idx][idx - offset]
+#             band_indices[band] = orig_idx
+
+#         # Create row with NaN defaults
+#         row = {col: np.nan for col in columns}
+#         row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})  # type: ignore
+
+#         # Fill common columns from primary band
+#         primary_df = dfs[valid_bands.index(primary_band)].iloc[band_indices[primary_band]]
+#         for col in common_cols:
+#             if col in primary_df:
+#                 row[col] = primary_df[col]
+
+#         # Fill band-specific columns
+#         for band in group_bands:
+#             df = dfs[valid_bands.index(band)].iloc[band_indices[band]]
+#             for col in band_specific_cols:
+#                 col_name = f'{col}_{band}'
+#                 if col in df:
+#                     row[col_name] = df[col]
+
+#         rows.append(row)
+
+#     # Create final DataFrame
+#     if rows:
+#         result_df = pd.DataFrame(rows, columns=columns)
+#     else:
+#         result_df = pd.DataFrame(columns=columns)
+
+#     # Add unique IDs
+#     result_df.insert(0, 'unique_id', np.arange(len(result_df)))
+
+#     return result_df
+
+
+# def match_coordinates_across_bands_keep_lsb(
+#     band_data: dict, max_sep: float = 10.0, band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i']
+# ) -> pd.DataFrame:
+#     """
+#     Cross-match detections across bands and merge photometric properties.
+#     Handles cases where bands may be missing or empty.
+#     Special handling for known dwarfs or LSB objects: these will be kept even if only detected in one band.
+
+#     Args:
+#         band_data: Dictionary containing data for each band
+#         max_sep: Maximum separation in arcseconds for matching
+#         band_priority: List of bands in order of priority for coordinate selection
+
+#     Returns:
+#         DataFrame with matches present in at least 2 bands (or known dwarfs in 1 band),
+#         or empty DataFrame if insufficient data
+#     """
+#     # Define column structure upfront
+#     band_specific_cols = [
+#         'ID',
+#         'X',
+#         'Y',
+#         'A',
+#         'B',
+#         'theta',
+#         'total_flux',
+#         'mu_max',
+#         'mu_median',
+#         'mu_mean',
+#         'R_fwhm',
+#         'R_e',
+#         'R10',
+#         'R25',
+#         'R75',
+#         'R90',
+#         'R100',
+#         'n_pix',
+#         'ra',
+#         'dec',
+#         're_arcsec',
+#         'r_fwhm_arcsec',
+#         'r_10_arcsec',
+#         'r_25_arcsec',
+#         'r_75_arcsec',
+#         'r_90_arcsec',
+#         'r_100_arcsec',
+#         'A_arcsec',
+#         'B_arcsec',
+#         'axis_ratio',
+#         'mag',
+#         'mu',
+#     ]
+#     common_cols = ['class_label', 'zspec', 'lsb', 'ID_known']
+#     columns = ['ra', 'dec'] + common_cols
+#     for band in band_priority:
+#         columns.extend(f'{col}_{band}' for col in band_specific_cols)
+
+#     # Collect valid bands and their data
+#     valid_bands = []
+#     all_coords = []
+#     bands_list = []
+#     orig_indices = []
+#     dfs = []
+
+#     for band in band_priority:
+#         # Skip if band is missing or empty
+#         if (
+#             band not in band_data
+#             or band_data[band] is None
+#             or 'ra' not in band_data[band]
+#             or 'dec' not in band_data[band]
+#             or len(band_data[band]['ra']) == 0
+#         ):
+#             continue
+
+#         data = band_data[band]
+#         coords = SkyCoord(ra=data['ra'] * u.deg, dec=data['dec'] * u.deg)
+
+#         valid_bands.append(band)
+#         all_coords.append(coords)
+#         bands_list.extend([band] * len(coords))
+#         orig_indices.append(np.arange(len(coords)))
+#         dfs.append(data['df'])
+
+#     # Return empty DataFrame if we don't have at least 2 valid bands
+#     if len(valid_bands) < 2:
+#         return pd.DataFrame(columns=['unique_id'] + columns)
+
+#     # Combine coordinates and find matches
+#     combined_coords = concatenate(all_coords)
+#     idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)
+
+#     # Filter matches to only include different bands
+#     mask = (idx1 < idx2) & (np.array([bands_list[i] != bands_list[j] for i, j in zip(idx1, idx2)]))
+#     idx1, idx2 = idx1[mask], idx2[mask]
+
+#     # Union-Find for grouping
+#     parent = list(range(len(combined_coords)))
+
+#     def find(u):
+#         while parent[u] != u:
+#             parent[u] = parent[parent[u]]
+#             u = parent[u]
+#         return u
+
+#     def union(u, v):
+#         pu, pv = find(u), find(v)
+#         if pu != pv:
+#             parent[pv] = pu
+
+#     # Group matching detections
+#     for i, j in zip(idx1, idx2):
+#         union(i, j)
+
+#     # Collect groups and their members
+#     groups = {}
+#     for idx in range(len(combined_coords)):
+#         root = find(idx)
+#         if root not in groups:
+#             groups[root] = set()
+#         groups[root].add(idx)
+
+#     # Build output DataFrame
+#     rows = []
+#     for group in groups.values():
+#         # Check if this group has matches in at least 2 bands
+#         group_bands = {bands_list[idx] for idx in group}
+
+#         # MODIFIED: Special handling for single-band groups that might be known dwarfs
+#         if len(group_bands) < 2:
+#             # Check if any object in this group meets exception criteria (lsb=1 or ID_known is not NaN)
+#             should_keep = False
+
+#             for idx in group:
+#                 # Get band and original index for this object
+#                 band = bands_list[idx]
+#                 band_idx = valid_bands.index(band)
+#                 offset = sum(len(c) for c in all_coords[:band_idx])
+#                 orig_idx = orig_indices[band_idx][idx - offset]
+#                 df_row = dfs[band_idx].iloc[orig_idx]
+
+#                 # Check if this is a known dwarf or LSB object
+#                 if ('lsb' in df_row and df_row['lsb'] == 1) or (
+#                     'ID_known' in df_row and pd.notna(df_row['ID_known'])
+#                 ):
+#                     should_keep = True
+#                     break
+
+#             # Skip this group if no known dwarfs or LSB objects
+#             if not should_keep:
+#                 continue
+
+#         # Select primary band coordinates based on priority
+#         primary_band = next((b for b in band_priority if b in group_bands), None)
+#         primary_idx = next(idx for idx in group if bands_list[idx] == primary_band)
+#         primary_coord = combined_coords[primary_idx]
+
+#         # Map indices back to original dataframes
+#         band_indices = {}
+#         for idx in group:
+#             band = bands_list[idx]
+#             band_idx = valid_bands.index(band)
+#             offset = sum(len(c) for c in all_coords[:band_idx])
+#             orig_idx = orig_indices[band_idx][idx - offset]
+#             band_indices[band] = orig_idx
+
+#         # Create row with NaN defaults
+#         row = {col: np.nan for col in columns}
+#         row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})  # type: ignore
+
+#         # Fill common columns from primary band
+#         primary_df = dfs[valid_bands.index(primary_band)].iloc[band_indices[primary_band]]
+#         for col in common_cols:
+#             if col in primary_df:
+#                 row[col] = primary_df[col]
+
+#         # Fill band-specific columns
+#         for band in group_bands:
+#             df = dfs[valid_bands.index(band)].iloc[band_indices[band]]
+#             for col in band_specific_cols:
+#                 col_name = f'{col}_{band}'
+#                 if col in df:
+#                     row[col_name] = df[col]
+
+#         rows.append(row)
+
+#     # Create final DataFrame
+#     if rows:
+#         result_df = pd.DataFrame(rows, columns=columns)
+#     else:
+#         result_df = pd.DataFrame(columns=columns)
+
+#     # Add unique IDs
+#     result_df.insert(0, 'unique_id', np.arange(len(result_df)))
+
+#     return result_df
+
+
 def match_coordinates_across_bands(
-    band_data: dict, max_sep: float = 10.0, band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i']
+    band_data: dict,
+    max_sep: float = 10.0,
+    band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i'],
 ) -> pd.DataFrame:
     """
-    Cross-match detections across bands and merge photometric properties.
-    Handles cases where bands may be missing or empty.
+    Cross-match detections, refining multi-band groups and keeping specific
+    single-band detections (lsb=1 or known ID). Final coordinates selected
+    based on priority logic applied to the final group members.
 
     Args:
-        band_data: Dictionary containing data for each band
-        max_sep: Maximum separation in arcseconds for matching
-        band_priority: List of bands in order of priority for coordinate selection
+        band_data: Dictionary containing data for each band.
+        max_sep: Maximum separation for initial matching.
+        band_priority: List of bands for priority selection.
 
     Returns:
-        DataFrame with matches present in at least 2 bands, or empty DataFrame if insufficient data
+        DataFrame with refined matches and allowed single-band detections.
     """
-    # Define column structure upfront
+    # --- 1. Define Output Structure ---
     band_specific_cols = [
         'ID',
         'X',
@@ -579,319 +956,370 @@ def match_coordinates_across_bands(
     for band in band_priority:
         columns.extend(f'{col}_{band}' for col in band_specific_cols)
 
-    # Collect valid bands and their data
+    # --- 2. Validate and Prepare Input Data ---
     valid_bands = []
-    all_coords = []
-    bands_list = []
-    orig_indices = []
+    all_coords_list = []
+    bands_map = []
+    orig_indices_list = []
     dfs = []
-
     for band in band_priority:
-        # Skip if band is missing or empty
+        if band not in band_data or band_data[band] is None:
+            continue
+        data = band_data[band]
+        if not all(k in data for k in ['ra', 'dec', 'df']):
+            continue
         if (
-            band not in band_data
-            or band_data[band] is None
-            or 'ra' not in band_data[band]
-            or 'dec' not in band_data[band]
-            or len(band_data[band]['ra']) == 0
+            not hasattr(data['ra'], '__len__')
+            or not hasattr(data['dec'], '__len__')
+            or len(data['ra']) == 0
+            or len(data['ra']) != len(data['dec'])
         ):
             continue
-
-        data = band_data[band]
-        coords = SkyCoord(ra=data['ra'] * u.deg, dec=data['dec'] * u.deg)
-
+        if not isinstance(data['df'], pd.DataFrame) or len(data['df']) != len(data['ra']):
+            continue
+        if 'ra' not in data['df'].columns or 'dec' not in data['df'].columns:
+            continue
+        coords = SkyCoord(ra=data['ra'], dec=data['dec'], unit='deg')
+        if not np.all(np.isfinite(coords.ra.deg)) or not np.all(np.isfinite(coords.dec.deg)):
+            logger.error(f"  - Skipping band '{band}': Non-finite input coordinates.")
+            continue
+        logger.debug(f"  - Band '{band}': Found {len(coords)} detections.")
         valid_bands.append(band)
-        all_coords.append(coords)
-        bands_list.extend([band] * len(coords))
-        orig_indices.append(np.arange(len(coords)))
+        all_coords_list.append(coords)
+        bands_map.extend([band] * len(coords))
+        orig_indices_list.append(np.arange(len(coords)))
         dfs.append(data['df'])
 
-    # Return empty DataFrame if we don't have at least 2 valid bands
-    if len(valid_bands) < 2:
+    # Need at least one band to potentially keep single detections
+    if len(valid_bands) == 0:
+        logger.warning('\nNo valid bands found.')
         return pd.DataFrame(columns=['unique_id'] + columns)
+    logger.debug(f'\nFound {len(valid_bands)} valid bands: {valid_bands}')
 
-    # Combine coordinates and find matches
-    combined_coords = concatenate(all_coords)
-    idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)
+    # --- 3. Initial Matching and Grouping (Union-Find) ---
+    initial_groups = defaultdict(set)
+    if len(valid_bands) >= 2:
+        combined_coords = concatenate(all_coords_list)
+        idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)
+        mask = (idx1 < idx2) & (
+            np.array([bands_map[i] != bands_map[j] for i, j in zip(idx1, idx2)])
+        )
+        idx1, idx2 = idx1[mask], idx2[mask]
+        parent = list(range(len(combined_coords)))
 
-    # Filter matches to only include different bands
-    mask = (idx1 < idx2) & (np.array([bands_list[i] != bands_list[j] for i, j in zip(idx1, idx2)]))
-    idx1, idx2 = idx1[mask], idx2[mask]
+        def find(u):
+            while parent[u] != u:
+                parent[u] = parent[parent[u]]
+                u = parent[u]
+            return u
 
-    # Union-Find for grouping
-    parent = list(range(len(combined_coords)))
+        def union(u, v):
+            pu, pv = find(u), find(v)
+            parent[pv] = pu if pu != pv else pv
 
-    def find(u):
-        while parent[u] != u:
-            parent[u] = parent[parent[u]]
-            u = parent[u]
-        return u
+        for i, j in zip(idx1, idx2):
+            union(i, j)
+        for idx in range(len(combined_coords)):
+            initial_groups[find(idx)].add(idx)
+    else:  # Only one valid band
+        logger.debug('Only one valid band found. Checking for single-band exceptions...')
+        # Treat each detection as its own group
+        combined_coords = all_coords_list[0]  # Use the single band's coords
+        # Need to ensure bands_map is correct for single band case
+        bands_map = [valid_bands[0]] * len(combined_coords)
+        for idx in range(len(combined_coords)):
+            initial_groups[idx].add(idx)  # Each detection is its own group
 
-    def union(u, v):
-        pu, pv = find(u), find(v)
-        if pu != pv:
-            parent[pv] = pu
+    # --- 4. Process Initial Groups (Refinement or Single-Band Exception Check) ---
+    final_rows = []
+    group_counter = 0
+    refined_group_count = 0
+    single_kept_count = 0
 
-    # Group matching detections
-    for i, j in zip(idx1, idx2):
-        union(i, j)
-
-    # Collect groups and their members
-    groups = {}
-    for idx in range(len(combined_coords)):
-        root = find(idx)
-        if root not in groups:
-            groups[root] = set()
-        groups[root].add(idx)
-
-    # Build output DataFrame
-    rows = []
-    for group in groups.values():
-        # Only keep groups with matches in at least 2 bands
-        group_bands = {bands_list[idx] for idx in group}
-        if len(group_bands) < 2:
+    for group_indices in initial_groups.values():
+        group_counter += 1
+        if not group_indices:
             continue
 
-        # Select primary band coordinates based on priority
-        primary_band = next((b for b in band_priority if b in group_bands), None)
-        primary_idx = next(idx for idx in group if bands_list[idx] == primary_band)
-        primary_coord = combined_coords[primary_idx]
+        # Determine bands present in this initial group
+        # Ensure bands_map has been correctly populated for single-band case too
+        group_bands = {bands_map[idx] for idx in group_indices}
+        n_bands_in_group = len(group_bands)
 
-        # Map indices back to original dataframes
-        band_indices = {}
-        for idx in group:
-            band = bands_list[idx]
-            band_idx = valid_bands.index(band)
-            offset = sum(len(c) for c in all_coords[:band_idx])
-            orig_idx = orig_indices[band_idx][idx - offset]
-            band_indices[band] = orig_idx
+        refined_group_indices = set()  # Will store indices kept for the final object
+        is_single_band_exception = False
 
-        # Create row with NaN defaults
-        row = {col: np.nan for col in columns}
-        row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})  # type: ignore
+        # Handle Single-Band Groups ---
+        if n_bands_in_group == 1:
+            the_band = list(group_bands)[0]
+            keep_this_single_band_group = False
+            single_member_idx_to_keep = -1
 
-        # Fill common columns from primary band
-        primary_df = dfs[valid_bands.index(primary_band)].iloc[band_indices[primary_band]]
-        for col in common_cols:
-            if col in primary_df:
-                row[col] = primary_df[col]
+            # Check exception criteria for the first member found that qualifies
+            for idx in group_indices:
+                band_idx_in_valid = valid_bands.index(the_band)
+                # Need offset calculation even for single band if matching was done
+                current_offset = 0
+                if (
+                    len(valid_bands) > 1
+                ):  # Calculate offset only if multiple bands existed initially
+                    current_offset = sum(len(c) for c in all_coords_list[:band_idx_in_valid])
 
-        # Fill band-specific columns
-        for band in group_bands:
-            df = dfs[valid_bands.index(band)].iloc[band_indices[band]]
-            for col in band_specific_cols:
-                col_name = f'{col}_{band}'
-                if col in df:
-                    row[col_name] = df[col]
-
-        rows.append(row)
-
-    # Create final DataFrame
-    if rows:
-        result_df = pd.DataFrame(rows, columns=columns)
-    else:
-        result_df = pd.DataFrame(columns=columns)
-
-    # Add unique IDs
-    result_df.insert(0, 'unique_id', np.arange(len(result_df)))
-
-    return result_df
-
-
-def match_coordinates_across_bands_keep_lsb(
-    band_data: dict, max_sep: float = 10.0, band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i']
-) -> pd.DataFrame:
-    """
-    Cross-match detections across bands and merge photometric properties.
-    Handles cases where bands may be missing or empty.
-    Special handling for known dwarfs or LSB objects: these will be kept even if only detected in one band.
-
-    Args:
-        band_data: Dictionary containing data for each band
-        max_sep: Maximum separation in arcseconds for matching
-        band_priority: List of bands in order of priority for coordinate selection
-
-    Returns:
-        DataFrame with matches present in at least 2 bands (or known dwarfs in 1 band),
-        or empty DataFrame if insufficient data
-    """
-    # Define column structure upfront
-    band_specific_cols = [
-        'ID',
-        'X',
-        'Y',
-        'A',
-        'B',
-        'theta',
-        'total_flux',
-        'mu_max',
-        'mu_median',
-        'mu_mean',
-        'R_fwhm',
-        'R_e',
-        'R10',
-        'R25',
-        'R75',
-        'R90',
-        'R100',
-        'n_pix',
-        'ra',
-        'dec',
-        're_arcsec',
-        'r_fwhm_arcsec',
-        'r_10_arcsec',
-        'r_25_arcsec',
-        'r_75_arcsec',
-        'r_90_arcsec',
-        'r_100_arcsec',
-        'A_arcsec',
-        'B_arcsec',
-        'axis_ratio',
-        'mag',
-        'mu',
-    ]
-    common_cols = ['class_label', 'zspec', 'lsb', 'ID_known']
-    columns = ['ra', 'dec'] + common_cols
-    for band in band_priority:
-        columns.extend(f'{col}_{band}' for col in band_specific_cols)
-
-    # Collect valid bands and their data
-    valid_bands = []
-    all_coords = []
-    bands_list = []
-    orig_indices = []
-    dfs = []
-
-    for band in band_priority:
-        # Skip if band is missing or empty
-        if (
-            band not in band_data
-            or band_data[band] is None
-            or 'ra' not in band_data[band]
-            or 'dec' not in band_data[band]
-            or len(band_data[band]['ra']) == 0
-        ):
-            continue
-
-        data = band_data[band]
-        coords = SkyCoord(ra=data['ra'] * u.deg, dec=data['dec'] * u.deg)
-
-        valid_bands.append(band)
-        all_coords.append(coords)
-        bands_list.extend([band] * len(coords))
-        orig_indices.append(np.arange(len(coords)))
-        dfs.append(data['df'])
-
-    # Return empty DataFrame if we don't have at least 2 valid bands
-    if len(valid_bands) < 2:
-        return pd.DataFrame(columns=['unique_id'] + columns)
-
-    # Combine coordinates and find matches
-    combined_coords = concatenate(all_coords)
-    idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)
-
-    # Filter matches to only include different bands
-    mask = (idx1 < idx2) & (np.array([bands_list[i] != bands_list[j] for i, j in zip(idx1, idx2)]))
-    idx1, idx2 = idx1[mask], idx2[mask]
-
-    # Union-Find for grouping
-    parent = list(range(len(combined_coords)))
-
-    def find(u):
-        while parent[u] != u:
-            parent[u] = parent[parent[u]]
-            u = parent[u]
-        return u
-
-    def union(u, v):
-        pu, pv = find(u), find(v)
-        if pu != pv:
-            parent[pv] = pu
-
-    # Group matching detections
-    for i, j in zip(idx1, idx2):
-        union(i, j)
-
-    # Collect groups and their members
-    groups = {}
-    for idx in range(len(combined_coords)):
-        root = find(idx)
-        if root not in groups:
-            groups[root] = set()
-        groups[root].add(idx)
-
-    # Build output DataFrame
-    rows = []
-    for group in groups.values():
-        # Check if this group has matches in at least 2 bands
-        group_bands = {bands_list[idx] for idx in group}
-
-        # MODIFIED: Special handling for single-band groups that might be known dwarfs
-        if len(group_bands) < 2:
-            # Check if any object in this group meets exception criteria (lsb=1 or ID_known is not NaN)
-            should_keep = False
-
-            for idx in group:
-                # Get band and original index for this object
-                band = bands_list[idx]
-                band_idx = valid_bands.index(band)
-                offset = sum(len(c) for c in all_coords[:band_idx])
-                orig_idx = orig_indices[band_idx][idx - offset]
-                df_row = dfs[band_idx].iloc[orig_idx]
-
-                # Check if this is a known dwarf or LSB object
-                if ('lsb' in df_row and df_row['lsb'] == 1) or (
-                    'ID_known' in df_row and pd.notna(df_row['ID_known'])
+                # Ensure index 'idx' is valid relative to offset
+                if idx < current_offset or idx >= current_offset + len(
+                    all_coords_list[band_idx_in_valid]
                 ):
-                    should_keep = True
-                    break
+                    logger.warning(
+                        f'Warning: Index {idx} out of bounds for band {the_band} in group {group_counter}. Skipping index.'
+                    )
+                    continue
 
-            # Skip this group if no known dwarfs or LSB objects
-            if not should_keep:
+                orig_idx = orig_indices_list[band_idx_in_valid][idx - current_offset]
+
+                # Check bounds for iloc
+                if orig_idx < 0 or orig_idx >= len(dfs[band_idx_in_valid]):
+                    logger.warning(
+                        f'Warning: Original index {orig_idx} out of bounds for DataFrame of band {the_band} in group {group_counter}. Skipping index.'
+                    )
+                    continue
+
+                df_row = dfs[band_idx_in_valid].iloc[orig_idx]
+
+                lsb_check = 'lsb' in df_row and pd.notna(df_row['lsb']) and df_row['lsb'] == 1
+                id_known_check = 'ID_known' in df_row and pd.notna(df_row['ID_known'])
+
+                if lsb_check or id_known_check:
+                    keep_this_single_band_group = True
+                    single_member_idx_to_keep = idx
+                    break  # Keep the first qualifying member found
+
+            if keep_this_single_band_group:
+                refined_group_indices = {single_member_idx_to_keep}
+                single_kept_count += 1
+                is_single_band_exception = True  # Mark as exception
+                # Skip refinement logic below
+            else:
+                continue  # Skip this single-band group entirely
+
+        # Handle Multi-Band Groups ---
+        elif n_bands_in_group >= 2:
+            is_single_band_exception = False  # Mark as multi-band
+            group_coords = [combined_coords[idx] for idx in group_indices]
+            if not group_coords:
                 continue
 
-        # Select primary band coordinates based on priority
-        primary_band = next((b for b in band_priority if b in group_bands), None)
-        primary_idx = next(idx for idx in group if bands_list[idx] == primary_band)
-        primary_coord = combined_coords[primary_idx]
+            band_counts = defaultdict(int)
+            members_by_band = defaultdict(list)
+            for idx in group_indices:
+                band = bands_map[idx]
+                band_counts[band] += 1
+                members_by_band[band].append(idx)
+            has_conflict = any(count > 1 for count in band_counts.values())
 
-        # Map indices back to original dataframes
-        band_indices = {}
-        for idx in group:
-            band = bands_list[idx]
-            band_idx = valid_bands.index(band)
-            offset = sum(len(c) for c in all_coords[:band_idx])
-            orig_idx = orig_indices[band_idx][idx - offset]
-            band_indices[band] = orig_idx
+            if has_conflict:
+                try:  # Select center calculation method
+                    group_center = get_coord_median(group_coords)
+                except Exception as e:
+                    logger.error(
+                        f'  Warning: Could not calculate center for group {group_counter}. Skipping. Error: {e}'
+                    )
+                    continue
+                # Select closest member per band
+                current_refined_indices = set()
+                for band, member_indices in members_by_band.items():
+                    if len(member_indices) == 1:
+                        current_refined_indices.add(member_indices[0])
+                    else:
+                        min_sep = np.inf * u.deg
+                        closest_idx = -1
+                        for idx in member_indices:
+                            try:
+                                coord_obj = combined_coords[idx]
+                                if not isinstance(coord_obj, SkyCoord):
+                                    continue
+                                sep = group_center.separation(coord_obj)
+                                if sep < min_sep:
+                                    min_sep = sep
+                                    closest_idx = idx
+                            except Exception as sep_e:
+                                logger.error(
+                                    f'  Warning: Error calculating separation for idx {idx}. Error: {sep_e}'
+                                )
+                        if closest_idx != -1:
+                            current_refined_indices.add(closest_idx)
+                refined_group_indices = current_refined_indices
+            else:  # No conflict
+                refined_group_indices = group_indices
 
-        # Create row with NaN defaults
+            # Check if refinement left enough bands
+            refined_group_bands = {bands_map[idx] for idx in refined_group_indices}
+
+            if not is_single_band_exception and len(refined_group_bands) < 2:
+                continue  # Skip if refinement reduced bands below threshold FOR MULTI-BAND groups
+
+            refined_group_count += 1
+        else:  # Should not happen (0 bands)
+            continue
+
+        # --- 5. Process Final Group Members (Single or Refined Multi-Band) ---
+        if not refined_group_indices:
+            continue  # Skip if refinement resulted in empty set
+
+        final_group_bands = {bands_map[idx] for idx in refined_group_indices}
+
+        # Determine Final Coordinates using priority band in the final set of members
+        primary_band_final = next((b for b in band_priority if b in final_group_bands), None)
+        if primary_band_final is None:
+            logger.warning(f'  Warning: No primary band for final group {group_counter}. Skipping.')
+            continue
+        try:
+            primary_idx_final = next(
+                idx for idx in refined_group_indices if bands_map[idx] == primary_band_final
+            )
+        except StopIteration:
+            logger.warning(
+                f'  Warning: Index for primary band {primary_band_final} not found in final group {group_counter}. Skipping.'
+            )
+            continue
+        final_coord_from_primary = combined_coords[primary_idx_final]
+
+        # Map final indices to original df indices
+        band_orig_indices = {}
+        for idx in refined_group_indices:
+            band = bands_map[idx]
+            band_idx_in_valid = valid_bands.index(band)
+            # Need offset calculation consistent with how combined_coords was built
+            current_offset = 0
+            if len(valid_bands) > 1:  # Only relevant if concatenation happened
+                current_offset = sum(len(c) for c in all_coords_list[:band_idx_in_valid])
+
+            # Ensure index 'idx' is valid relative to offset before subtraction
+            if idx < current_offset or idx >= current_offset + len(
+                all_coords_list[band_idx_in_valid]
+            ):
+                logger.warning(
+                    f'Warning: Index {idx} out of bounds for band {band} in band_orig_indices mapping for group {group_counter}. Skipping index.'
+                )
+                continue
+
+            orig_idx = orig_indices_list[band_idx_in_valid][idx - current_offset]
+
+            # Check bounds before iloc
+            if orig_idx < 0 or orig_idx >= len(dfs[band_idx_in_valid]):
+                logger.warning(
+                    f'Warning: Original index {orig_idx} out of bounds for DataFrame of band {band} in group {group_counter} (band_orig_indices). Skipping index.'
+                )
+                continue
+
+            band_orig_indices[band] = orig_idx
+
+        # --- 6. Build Output Row ---
         row = {col: np.nan for col in columns}
-        row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})  # type: ignore
+        row['ra'] = final_coord_from_primary.ra.deg
+        row['dec'] = final_coord_from_primary.dec.deg
 
-        # Fill common columns from primary band
-        primary_df = dfs[valid_bands.index(primary_band)].iloc[band_indices[primary_band]]
+        # Fill common columns
         for col in common_cols:
-            if col in primary_df:
-                row[col] = primary_df[col]
-
+            for band in band_priority:
+                # Use final_group_bands here
+                if band in final_group_bands:
+                    # Check if band exists in mapping
+                    if band not in band_orig_indices:
+                        continue
+                    orig_idx = band_orig_indices[band]
+                    band_df_row = dfs[valid_bands.index(band)].iloc[orig_idx]
+                    if col in band_df_row:
+                        value = band_df_row[col]
+                        is_valid = (value is not None) if (col == 'ID_known') else pd.notna(value)
+                        if is_valid:
+                            row[col] = value
+                            break
         # Fill band-specific columns
-        for band in group_bands:
-            df = dfs[valid_bands.index(band)].iloc[band_indices[band]]
+        for band in final_group_bands:  # Use final_group_bands here
+            # Verify that band exists in mapping
+            if band not in band_orig_indices:
+                continue
+            orig_idx = band_orig_indices[band]
+            band_df_row = dfs[valid_bands.index(band)].iloc[orig_idx]
             for col in band_specific_cols:
                 col_name = f'{col}_{band}'
-                if col in df:
-                    row[col_name] = df[col]
+                if col in band_df_row:
+                    row[col_name] = band_df_row[col]
+        final_rows.append(row)
 
-        rows.append(row)
+    if not final_rows:
+        logger.warning('Warning: No matching objects found.')
+        result_df = pd.DataFrame(columns=['unique_id'] + columns)
+        # Ensure unique_id exists even if empty
+        if 'unique_id' in result_df.columns:
+            result_df = result_df.drop(columns=['unique_id'])
+        result_df.insert(0, 'unique_id', [])
+        return result_df  # Return empty DataFrame with correct columns
 
-    # Create final DataFrame
-    if rows:
-        result_df = pd.DataFrame(rows, columns=columns)
+    # Create the DataFrame *before* adding unique_id and resolving conflicts
+    result_df = pd.DataFrame(final_rows, columns=columns)
+
+    # --- 8. Resolve ID_known Conflicts using Surface Brightness ('mu') ---
+    indices_to_drop = set()  # Use a set to automatically handle duplicates
+
+    # Check if ID_known column exists and has data
+    if 'ID_known' in result_df.columns and result_df['ID_known'].notna().any():
+        # Find IDs that appear more than once (duplicates)
+        id_counts = result_df.dropna(subset=['ID_known'])['ID_known'].value_counts()
+        duplicated_ids = id_counts[id_counts > 1].index.tolist()
+
+        if duplicated_ids:
+            logger.debug(f'  - Found {len(duplicated_ids)} ID_known values with conflicts.')
+            # Define the mu column names to check based on the bands used
+            mu_cols_to_check = [
+                f'mu_{band}' for band in valid_bands if f'mu_{band}' in result_df.columns
+            ]
+
+            for conflict_id in duplicated_ids:
+                # Get rows with the current conflicting ID
+                conflict_rows = result_df[result_df['ID_known'] == conflict_id]
+
+                # Find the best (minimum) mu value for each conflicting row
+                # Handle rows where all relevant mu values might be NaN
+                best_mus = conflict_rows[mu_cols_to_check].min(
+                    axis=1, skipna=True
+                )  # Get min mu per row
+
+                # If all mu values for all conflicting rows are NaN, keep the first one arbitrarily
+                if best_mus.isna().all():
+                    idx_to_keep = conflict_rows.index[0]
+                    logger.debug(
+                        f'    - ID {conflict_id}: All mu values NaN. Keeping first occurrence (index {idx_to_keep}).'
+                    )
+                else:
+                    # Find the index corresponding to the overall minimum mu value (highest surf bright)
+                    # idxmin will skip NaNs by default
+                    idx_to_keep = best_mus.idxmax()
+                    logger.debug(
+                        f'    - ID {conflict_id}: Keeping row index {idx_to_keep} (Best mu: {best_mus[idx_to_keep]:.4f}).'
+                    )
+
+                # Add indices of all *other* rows with this ID to the drop set
+                indices_to_drop.update(conflict_rows.index.difference([idx_to_keep]))
+
+            # Drop the conflicting rows
+            if indices_to_drop:
+                logger.debug(f'  - Dropping {len(indices_to_drop)} rows due to ID_known conflicts.')
+                result_df = result_df.drop(index=list(indices_to_drop))
+        else:
+            logger.debug('  - No duplicate ID_known values found.')
     else:
-        result_df = pd.DataFrame(columns=columns)
+        logger.debug(
+            "  - No 'ID_known' column or no valid IDs found, skipping conflict resolution."
+        )
 
-    # Add unique IDs
+    # --- 9. Add Final Unique IDs ---
+    # Ensure unique_id column doesn't exist before inserting
+    if 'unique_id' in result_df.columns:
+        result_df = result_df.drop(columns=['unique_id'])
+    # Insert unique IDs based on the final filtered DataFrame
     result_df.insert(0, 'unique_id', np.arange(len(result_df)))
+    logger.debug(f'Total objects in final DataFrame after conflict resolution: {len(result_df)}')
 
     return result_df
 

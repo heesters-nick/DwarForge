@@ -276,7 +276,7 @@ def update_available_tiles(path, in_dict, save=True):
                 band_tiles = Client().glob1(vos_dir, f'*{suffix}.fits')
             end_fetch = time.time()
             logger.info(
-                f'Retrieving {band_filter}-band tiles completed. Took {np.round((end_fetch-start_fetch)/60, 3)} minutes.'
+                f'Retrieving {band_filter}-band tiles completed. Took {np.round((end_fetch - start_fetch) / 60, 3)} minutes.'
             )
             if save:
                 np.savetxt(os.path.join(path, f'{band}_tiles.txt'), band_tiles, fmt='%s')
@@ -653,7 +653,7 @@ def open_fits(file_path, fits_ext):
         data = hdul[fits_ext].data.astype(np.float32)  # type: ignore
         header = hdul[fits_ext].header  # type: ignore
     logger.debug(
-        f'Fits file {os.path.basename(file_path)} opened in {time.time()-start_opening:.2f} seconds.'
+        f'Fits file {os.path.basename(file_path)} opened in {time.time() - start_opening:.2f} seconds.'
     )
     return data, header
 
@@ -826,3 +826,44 @@ def open_raw_data(file_path, fits_ext, band):
         data, header = open_fits(file_path, fits_ext)
 
     return data, header
+
+
+def get_coord_median(coords: list[SkyCoord]) -> SkyCoord:
+    """
+    Calculates the coordinate-wise median (median RA, median Dec).
+    Handles RA wrap-around. Robust against non-finite inputs checked beforehand.
+    """
+    if not coords:
+        raise ValueError('Input list cannot be empty.')
+    try:
+        common_frame = coords[0].frame
+        coords_in_frame = [c.transform_to(common_frame) for c in coords]
+
+        # Extract ra and dec values in degrees
+        ras = np.array([c.ra.deg for c in coords_in_frame])
+        decs = np.array([c.dec.deg for c in coords_in_frame])
+
+        # Median Dec (simple)
+        median_dec = np.median(decs)
+
+        # Median RA (handle wrap-around)
+        # Check if the RA range suggests wrap-around
+        ras_sorted = np.sort(ras)
+        ra_range = ras_sorted[-1] - ras_sorted[0]
+        if ra_range > 180.0:
+            # Shift RAs where RA < 180 by +360 degrees
+            ras_shifted = np.where(ras < 180.0, ras + 360.0, ras)
+            median_ra_shifted = np.median(ras_shifted)
+            # Ensure the result is back in the 0-360 range
+            median_ra = median_ra_shifted % 360.0
+        else:
+            # No wrap-around suspected, use simple median
+            median_ra = np.median(ras)
+
+        # Create SkyCoord from median ra/dec
+        median_skycoord = SkyCoord(ra=median_ra, dec=median_dec, unit='deg', frame=common_frame)
+        return median_skycoord
+    except Exception as e:
+        # Add more context to the error
+        logger.error(f'Error in get_coord_median for input coords (first few shown): {coords[:3]}')
+        raise ValueError(f'Could not calculate coordinate median: {e}')

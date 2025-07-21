@@ -4,6 +4,7 @@ import logging
 import multiprocessing
 import os
 import shutil
+import sys
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor
@@ -14,11 +15,18 @@ from queue import Empty
 import h5py
 import numpy as np
 import pandas as pd
+import psutil
 import torch
 import yaml
 from tqdm import tqdm
 
-from inference_utils import cpu_preprocess_worker, cpu_write_worker, gpu_worker, process_cutouts
+from inference_utils import (
+    cpu_preprocess_worker,
+    cpu_write_worker,
+    gpu_worker,
+    process_cutouts,
+    read_tile_data,
+)
 from logging_setup import setup_logger
 from zoobot_utils import ensemble_predict, load_models
 
@@ -29,7 +37,7 @@ DEFAULT_CONFIG = {
     'base_dir': None,
     'model_paths': [],
     'log_dir': './logs',
-    'log_name': 'inference',
+    'log_name': 'inference_missing',
     'log_level': 'INFO',
     'resume': False,
     'test_mode': False,
@@ -40,8 +48,8 @@ DEFAULT_CONFIG = {
     # CPU mode specific settings
     'cpu': {
         'num_workers': None,  # If None, will use CPU count - 1
-        'inference_batch_size': 64,
-        'process_batch_size': 100,
+        'inference_batch_size': 150,
+        'process_batch_size': 150,
     },
     # GPU mode specific settings
     'gpu': {
@@ -63,6 +71,23 @@ def initialize_logging(config):
         logging_level=getattr(logging, config['log_level']),
     )
     return logging.getLogger(config['log_name'])
+
+
+def log_memory_usage(location_tag=''):
+    """
+    Log current process memory usage with an identifying tag.
+
+    Args:
+        location_tag (str): Identifier for where memory is being measured
+    """
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+
+    # Convert to MB for readability
+    rss_mb = memory_info.rss / (1024 * 1024)
+    vms_mb = memory_info.vms / (1024 * 1024)
+
+    logger.debug(f'Memory usage at {location_tag}: RSS: {rss_mb:.2f} MB, VMS: {vms_mb:.2f} MB')
 
 
 def load_config(config_path):
@@ -96,12 +121,13 @@ def load_config(config_path):
     return config
 
 
-def find_valid_tiles(base_dir):
+def find_valid_tiles(base_dir, input_tiles):
     """
     Scans the base directory to find all tiles that have the required h5 file.
 
     Args:
         base_dir (str): Path to the base directory containing tile subdirectories
+        input_tiles (str): Path to file containing tiles to be processed. Will be processed if not None.
 
     Returns:
         list: List of valid tile paths that have the required h5 file
@@ -110,7 +136,10 @@ def find_valid_tiles(base_dir):
     valid_tiles = []
 
     # Get all subdirectories in the base directory
-    tile_dirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    if input_tiles is not None:
+        tile_dirs = read_tile_data(input_tiles)
+    else:
+        tile_dirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
     logger.info(f'Found {len(tile_dirs)} potential tile directories')
 
     # Check for the required h5 file in each directory
@@ -153,7 +182,11 @@ def worker_process(tile_batch, model_paths, process_batch_size, inference_batch_
         list: List of tiles that failed processing
     """
     # Load models once per worker
+    load_start = time.time()
+    log_memory_usage('before_model_load')
     models = load_models(model_paths)
+    log_memory_usage('after_model_load')
+    logger.info(f'Models loaded in {(time.time() - load_start):.2f} seconds.')
     if not models:
         logger.error('No models loaded in worker, skipping all tiles')
         return tile_batch  # Return all tiles as failed
@@ -181,19 +214,27 @@ def worker_process(tile_batch, model_paths, process_batch_size, inference_batch_
                 object_ids = h5_file['unique_id'][:]  # type: ignore
 
             # Preprocess all cutouts
+            prep_start = time.time()
+            log_memory_usage('before_preprocessing')
             preprocessed_images = process_cutouts(cutouts, process_batch_size=process_batch_size)
+            log_memory_usage('after_preprocessing')
+            logger.info(f'Tile prepped in {(time.time() - prep_start):.2f} seconds.')
 
+            predict_start = time.time()
             # Get ensemble predictions
+            log_memory_usage('before_inference')
             all_predictions = ensemble_predict(
                 models, preprocessed_images, batch_size=inference_batch_size, device=DEVICE
+            )
+            log_memory_usage('after_inference')
+            logger.info(
+                f'Ensemble prediction finished in {(time.time() - predict_start):.2f} seconds.'
             )
 
             # Create a temporary file path
             h5_temp_path = f'{h5_path}.temp'
 
             # Copy the original file to the temporary path first
-            import shutil
-
             shutil.copy2(h5_path, h5_temp_path)
 
             # Modify the temporary file
@@ -265,9 +306,9 @@ def run_cpu_processing(valid_tiles, config):
         list: List of tiles that failed processing
     """
     model_paths = config['model_paths']
-    num_workers = config['num_workers']
-    process_batch_size = config['process_batch_size']
-    inference_batch_size = config['inference_batch_size']
+    num_workers = config['cpu']['num_workers']
+    process_batch_size = config['cpu']['process_batch_size']
+    inference_batch_size = config['cpu']['inference_batch_size']
     if num_workers is None:
         num_workers = max(1, multiprocessing.cpu_count() - 1)
 
@@ -308,6 +349,253 @@ def run_cpu_processing(valid_tiles, config):
                 all_failed_tiles.extend(batch_failed_tiles)
             except Exception as e:
                 logger.error(f'Exception in worker process: {e}')
+
+    return all_failed_tiles
+
+
+def worker_process_shared(
+    tile_batch, shared_models, process_batch_size, inference_batch_size, device
+):
+    """
+    Worker process function that uses pre-loaded, shared models.
+
+    Args:
+        tile_batch (list): Batch of tile dictionaries to process.
+        shared_models (list): List of PyTorch models residing in shared memory.
+        process_batch_size (int): Number of images to preprocess in a batch.
+        inference_batch_size (int): Batch size for inference.
+        device (torch.device): The device to run inference on (CPU for this function).
+
+    Returns:
+        list: List of tiles that failed processing.
+    """
+    worker_pid = os.getpid()
+    log_memory_usage(f'Worker {worker_pid} start')
+    logger.info(f'Worker {worker_pid} starting processing {len(tile_batch)} tiles.')
+
+    # Ensure models are in evaluation mode
+    for model in shared_models:
+        model.eval()
+
+    failed_tiles = []
+
+    for tile_info in tile_batch:
+        tile_number = tile_info['tile_number']
+        h5_path = tile_info['h5_path']
+        parquet_path = tile_info['parquet_path']
+
+        logger.debug(f'Worker {worker_pid} processing tile {tile_number}')
+
+        try:
+            # Read data from the h5 file
+            with h5py.File(h5_path, 'r') as h5_file:
+                if 'images' not in h5_file or 'unique_id' not in h5_file:
+                    logger.error(
+                        f'Worker {worker_pid}: No image dataset found in {h5_path}, skipping'
+                    )
+                    failed_tiles.append(tile_info)
+                    continue
+                cutouts = h5_file['images'][:]
+                object_ids = h5_file['unique_id'][:]
+
+            if len(cutouts) == 0:
+                logger.warning(
+                    f'Worker {worker_pid}: No images found in tile {tile_number}, skipping'
+                )
+                continue  # Skip empty tiles
+
+            # Preprocess images
+            prep_start = time.time()
+            log_memory_usage(f'Worker {worker_pid} before_preprocessing T{tile_number}')
+            preprocessed_images = process_cutouts(cutouts, process_batch_size=process_batch_size)
+            log_memory_usage(f'Worker {worker_pid} after_preprocessing T{tile_number}')
+            logger.debug(
+                f'Worker {worker_pid}: Tile {tile_number} prepped in {(time.time() - prep_start):.2f}s.'
+            )
+
+            # Use shared models for inference
+            predict_start = time.time()
+            log_memory_usage(f'Worker {worker_pid} before_inference T{tile_number}')
+            all_predictions = ensemble_predict(
+                shared_models, preprocessed_images, batch_size=inference_batch_size, device=device
+            )
+            log_memory_usage(f'Worker {worker_pid} after_inference T{tile_number}')
+            logger.debug(
+                f'Worker {worker_pid}: Tile {tile_number} ensemble prediction finished in {(time.time() - predict_start):.2f}s.'
+            )
+
+            # Update H5 file with predictions
+            h5_temp_path = f'{h5_path}.temp'
+            shutil.copy2(h5_path, h5_temp_path)
+            with h5py.File(h5_temp_path, 'r+') as h5_temp:
+                if 'zoobot_pred_v2' in h5_temp:
+                    del h5_temp['zoobot_pred_v2']
+                h5_temp.create_dataset('zoobot_pred_v2', data=all_predictions.astype(np.float32))
+                h5_temp.flush()
+            os.replace(h5_temp_path, h5_path)
+
+            # Update Parquet file with predictions
+            df = pd.read_parquet(parquet_path)
+            prediction_map = dict(zip(object_ids, all_predictions))
+            df['zoobot_pred_v2'] = df['unique_id'].map(prediction_map)
+            parquet_temp_path = f'{parquet_path}.temp'
+            df.to_parquet(parquet_temp_path, index=False)
+            os.replace(parquet_temp_path, parquet_path)
+
+            logger.debug(f'Worker {worker_pid}: Successfully processed tile {tile_number}')
+
+        except Exception as e:
+            logger.error(
+                f'Worker {worker_pid}: Error processing tile {tile_number}: {e}\n{traceback.format_exc()}'
+            )
+            # Clean up temp files if they exist
+            if 'h5_temp_path' in locals() and os.path.exists(h5_temp_path):
+                try:
+                    os.remove(h5_temp_path)
+                except OSError:
+                    pass
+            if 'parquet_temp_path' in locals() and os.path.exists(parquet_temp_path):
+                try:
+                    os.remove(parquet_temp_path)
+                except OSError:
+                    pass
+            failed_tiles.append(tile_info)
+
+    # Collect garbage but don't delete shared models
+    gc.collect()
+    log_memory_usage(f'Worker {worker_pid} finish')
+    logger.info(f'Worker {worker_pid} finished processing batch. Failures: {len(failed_tiles)}')
+    return failed_tiles
+
+
+def run_cpu_processing_shared(valid_tiles, config):
+    """
+    Distribute work across multiple processes for parallel processing using shared models.
+
+    Args:
+        valid_tiles (list): List of valid tile dictionaries.
+        config (dict): Configuration dictionary.
+
+    Returns:
+        list: List of tiles that failed processing.
+    """
+    model_paths = config['model_paths']
+    num_workers = config['cpu']['num_workers']
+    process_batch_size = config['cpu']['process_batch_size']
+    inference_batch_size = config['cpu']['inference_batch_size']
+
+    # Ensure 'fork' start method for effective shared memory
+    # try:
+    #     if multiprocessing.get_start_method(allow_none=True) is None:
+    #         multiprocessing.set_start_method('fork')
+    #     elif multiprocessing.get_start_method() != 'fork':
+    #         logger.warning(
+    #             f"Multiprocessing start method is '{multiprocessing.get_start_method()}', not 'fork'. Shared memory may not be efficient."
+    #         )
+    # except Exception as e:
+    #     logger.warning(f"Could not set multiprocessing start method to 'fork': {e}")
+
+    if num_workers is None:
+        num_workers = max(1, multiprocessing.cpu_count() - 1)
+
+    # Load models in parent process
+    logger.info('Loading models in the main process...')
+    log_memory_usage('Parent before model load')
+    load_start_time = time.time()
+    models = load_models(model_paths)
+    if not models:
+        logger.error('Failed to load models in the main process. Aborting.')
+        return valid_tiles  # Return all as failed
+
+    logger.info(f'Models loaded in {(time.time() - load_start_time):.2f} seconds.')
+    log_memory_usage('Parent after model load')
+
+    # Move model parameters to shared memory
+    logger.info('Moving model parameters and buffers to shared memory...')
+    share_start_time = time.time()
+    for model in models:
+        model.eval()  # Ensure models are in eval mode
+        # Share parameters and buffers
+        for param in model.parameters():
+            param.share_memory_()
+        for buf in model.buffers():
+            buf.share_memory_()
+    logger.info(f'Models moved to shared memory in {(time.time() - share_start_time):.2f} seconds.')
+    log_memory_usage('Parent after model sharing')
+
+    logger.info(f'Starting parallel processing with {num_workers} workers using shared models.')
+
+    # Distribute tiles to workers optimally
+    tile_batches = []
+    if num_workers > 0 and len(valid_tiles) > 0:
+        # Calculate batch size to distribute tiles evenly
+        base_batch_size = len(valid_tiles) // num_workers
+        remainder = len(valid_tiles) % num_workers
+        current_pos = 0
+
+        for i in range(num_workers):
+            # Add extra tile to early workers if there's a remainder
+            size = base_batch_size + (1 if i < remainder else 0)
+            if size > 0:
+                batch = valid_tiles[current_pos : current_pos + size]
+                if batch:  # Ensure batch is not empty after slicing
+                    tile_batches.append(batch)
+                current_pos += size
+    elif len(valid_tiles) > 0:  # Handle case for num_workers=0 or 1
+        tile_batches.append(valid_tiles)
+
+    # Sanity check for empty batches
+    if not tile_batches and len(valid_tiles) > 0:
+        logger.warning(
+            'Tile batching resulted in no batches, but there are valid tiles. Check logic.'
+        )
+        # Fallback: create one large batch if needed
+        tile_batches = [valid_tiles]
+    elif not tile_batches and len(valid_tiles) == 0:
+        logger.info('No valid tiles to process.')
+        return []  # No failed tiles if none were processed
+
+    logger.info(
+        f'Split {len(valid_tiles)} tiles into {len(tile_batches)} batches for {num_workers} workers.'
+    )
+
+    # Create a partial function with shared_models and other fixed arguments
+    worker_func = partial(
+        worker_process_shared,
+        shared_models=models,  # Pass the list of shared models
+        process_batch_size=process_batch_size,
+        inference_batch_size=inference_batch_size,
+        device=torch.device('cpu'),  # Explicitly pass CPU device
+    )
+
+    all_failed_tiles = []
+    processing_start_time = time.time()
+
+    # Use ProcessPoolExecutor for parallel processing
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = [executor.submit(worker_func, batch) for batch in tile_batches]
+
+        # Process results as they complete
+        for future in tqdm(futures, total=len(futures), desc='Processing batches'):
+            try:
+                batch_failed_tiles = future.result()
+                if batch_failed_tiles:
+                    all_failed_tiles.extend(batch_failed_tiles)
+            except Exception as e:
+                logger.error(
+                    f'Exception returned from worker process future: {e}\n{traceback.format_exc()}'
+                )
+
+    processing_time = time.time() - processing_start_time
+    logger.info(f'All workers completed in {processing_time:.2f} seconds')
+
+    # Calculate statistics
+    successful_tiles = len(valid_tiles) - len(all_failed_tiles)
+    if successful_tiles > 0:
+        tiles_per_second = successful_tiles / processing_time
+        seconds_per_tile = processing_time / successful_tiles
+        logger.info(f'Processing rate: {tiles_per_second:.2f} tiles/second')
+        logger.info(f'Average time per tile: {seconds_per_tile:.2f} seconds')
 
     return all_failed_tiles
 
@@ -364,7 +652,7 @@ def run_gpu_processing(valid_tiles, config):
         p = Process(
             target=cpu_preprocess_worker,
             args=(tile_queue, gpu_task_queue, error_queue, done_event, config),
-            name=f'Preprocessor-{i+1}',
+            name=f'Preprocessor-{i + 1}',
         )
         p.daemon = True
         p.start()
@@ -382,7 +670,7 @@ def run_gpu_processing(valid_tiles, config):
                 done_event,
                 config,
             ),  # Pass completion queue
-            name=f'Writer-{i+1}',
+            name=f'Writer-{i + 1}',
         )
         w.daemon = True
         w.start()
@@ -413,7 +701,7 @@ def run_gpu_processing(valid_tiles, config):
                     tile_info, error_msg = error_queue.get_nowait()
                     if tile_info is not None:
                         logger.error(
-                            f"Error processing tile {tile_info['tile_number']}: {error_msg}"
+                            f'Error processing tile {tile_info["tile_number"]}: {error_msg}'
                         )
                         failed_tiles.append(tile_info)
                     else:
@@ -446,9 +734,9 @@ def run_gpu_processing(valid_tiles, config):
                     )
                     logger.info(
                         f'Progress: {len(completed_tiles)}/{total_tiles} tiles complete '
-                        + f'({(len(completed_tiles)/total_tiles)*100:.1f}%). '
+                        + f'({(len(completed_tiles) / total_tiles) * 100:.1f}%). '
                         + f'Failed: {len(failed_tiles)}. '
-                        + f'Rate: {rate:.2f} tiles/sec. Est. remaining: {remaining/60:.1f} min.'
+                        + f'Rate: {rate:.2f} tiles/sec. Est. remaining: {remaining / 60:.1f} min.'
                     )
                     last_log_time = current_time
 
@@ -549,7 +837,7 @@ def main(config):
         logger.info(f'Using CPU mode with {config["cpu"]["num_workers"]} workers')
 
     # Find valid tiles
-    valid_tiles = find_valid_tiles(config['base_dir'])
+    valid_tiles = find_valid_tiles(config['base_dir'], config['input_tiles'])
 
     if not valid_tiles:
         logger.error('No valid tiles found. Exiting.')
@@ -597,6 +885,7 @@ def main(config):
         f.write(f'Base directory: {config["base_dir"]}\n')
         if config['processing_mode'] == 'cpu':
             f.write(f'Number of workers: {config["cpu"]["num_workers"]}\n')
+            f.write('Using shared memory: Yes\n')
         else:
             f.write(f'Preprocessing workers: {config["gpu"]["preprocessing_workers"]}\n')
             f.write(f'Writer workers: {config["gpu"]["writer_workers"]}\n')
@@ -769,6 +1058,7 @@ def run_test(config):
 
     # Make a copy of the original test tiles with modified paths
     redirected_tiles = []
+    copy_start = time.time()
     for tile_info in test_tiles:
         original_h5_path = tile_info['h5_path']
         original_parquet_path = tile_info['parquet_path']
@@ -799,6 +1089,7 @@ def run_test(config):
         redirected_tiles.append(
             {'tile_number': tile_number, 'h5_path': test_h5_path, 'parquet_path': test_parquet_path}
         )
+    logger.info(f'Copied files in {(time.time() - copy_start):.2f} seconds.')
 
     if not redirected_tiles:
         logger.error('No valid tiles could be prepared for testing. Exiting test.')
@@ -812,9 +1103,6 @@ def run_test(config):
 
     try:
         if processing_mode == 'cpu':
-            # Limit workers for CPU test mode
-            if test_config['cpu']['num_workers'] is None or test_config['cpu']['num_workers'] > 4:
-                test_config['cpu']['num_workers'] = max(1, min(4, multiprocessing.cpu_count() - 1))
             logger.info(f'Testing CPU processing with {test_config["cpu"]["num_workers"]} workers')
 
             # Run CPU processing on test tiles
@@ -907,19 +1195,112 @@ def run_test(config):
 if __name__ == '__main__':
     # Hardcoded configuration file path
     CONFIG_FILE = 'inference_config.yaml'
+    config = None
+    logger = None
 
-    # Load configuration
-    config = load_config(CONFIG_FILE)
+    try:
+        # 1. Load Configuration
+        config = load_config(CONFIG_FILE)
 
-    # Initialize logging using your existing setup_logger function
-    logger = initialize_logging(config)
-    logger.info(f'Loaded configuration from {CONFIG_FILE}')
+        # 2. Initialize Logging
+        try:
+            logger = initialize_logging(config)
+            logger.info(f'Loaded configuration from {CONFIG_FILE}')
+        except Exception as log_e:
+            # Fallback basic logging if full setup fails
+            logging.basicConfig(
+                level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger()
+            logger.error(f'Failed to initialize full logging: {log_e}')
+            logger.info(f'Loaded configuration from {CONFIG_FILE} (using basic logging)')
 
-    # Check if we're in test mode
-    if config.get('test_mode', False):
-        run_test(config)
-    # Otherwise run normal processing or resume
-    elif config['resume']:
-        resume_from_failed(config)
-    else:
-        main(config)
+        # 3. Set Multiprocessing Start Method CONDITIONALLY based on Config
+        desired_method = None
+        mode = config['processing_mode']
+
+        if mode == 'gpu':
+            desired_method = 'spawn'  # GPU requires spawn
+        elif mode == 'cpu':
+            if sys.platform == 'win32':
+                desired_method = 'spawn'  # Fork not available on Windows
+                logger.warning(
+                    "CPU mode selected on Windows. Using 'spawn' start method (fork not available). Shared memory efficiency might be lower."
+                )
+            else:
+                desired_method = 'fork'  # CPU prefers fork for shared memory efficiency
+        else:
+            # This should ideally be caught by config validation in load_config
+            msg = f"Invalid processing_mode '{mode}' found in configuration."
+            logger.error(msg)
+            raise ValueError(msg)
+
+        if desired_method:
+            try:
+                current_method = multiprocessing.get_start_method(allow_none=True)
+                if current_method is None:
+                    multiprocessing.set_start_method(desired_method)
+                    logger.info(
+                        f"Multiprocessing start method set to '{desired_method}' for '{mode}' mode."
+                    )
+                elif current_method != desired_method:
+                    # Avoid forcing unless absolutely necessary as it might break libraries.
+                    logger.warning(
+                        f"Multiprocessing start method already set to '{current_method}'. "
+                        f"Desired method for '{mode}' mode is '{desired_method}'. Proceeding, but this might cause issues."
+                    )
+                    # Check if the problematic GPU scenario exists
+                    if mode == 'gpu' and current_method != 'spawn':
+                        logger.error(
+                            "CRITICAL WARNING: GPU mode selected, but start method is not 'spawn'. CUDA operations will likely fail!"
+                        )
+                    # Check if the potentially problematic CPU scenario exists
+                    elif mode == 'cpu' and sys.platform != 'win32' and current_method != 'fork':
+                        logger.warning(
+                            "WARNING: CPU mode selected, but start method is not 'fork'. Shared memory might not work as expected."
+                        )
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to set multiprocessing start method to '{desired_method}': {e}"
+                )
+                # If GPU mode needs spawn and failed, it's likely fatal
+                if mode == 'gpu' and multiprocessing.get_start_method(allow_none=True) != 'spawn':
+                    logger.critical(
+                        "FATAL: Cannot proceed with GPU mode without 'spawn' start method."
+                    )
+                    sys.exit(1)  # Exit if GPU mode cannot be set up correctly
+
+        # 4. Log initial memory (after logging is set up)
+        if logger:  # Ensure logger was initialized
+            log_memory_usage('Initial Parent Memory')
+
+        # 5. Proceed with main logic (test, resume, or main run)
+        if config.get('test_mode', False):
+            run_test(config)
+        elif config['resume']:
+            resume_from_failed(config)
+        else:
+            main(config)
+
+        if logger:  # Ensure logger was initialized
+            log_memory_usage('Final Parent Memory')
+
+    # --- Keep Original Exception Handling ---
+    except FileNotFoundError as e:
+        err_msg = f'ERROR: Configuration file not found: {CONFIG_FILE}'
+        print(err_msg)
+        # Use basic logging if logger wasn't set up
+        (logger or logging).error(f'Configuration file load failed: {e}')
+    except ValueError as e:
+        err_msg = f'ERROR: Invalid configuration or value: {e}'
+        print(err_msg)
+        (logger or logging).error(f'Configuration validation or runtime error: {e}')
+    except Exception as e:
+        # Catch-all for other unexpected errors
+        err_msg = f'An unexpected error occurred: {e}'
+        print(err_msg)
+        detailed_err_msg = (
+            f'An unexpected error occurred in main execution: {e}\n{traceback.format_exc()}'
+        )
+        (logger or logging).error(detailed_err_msg)

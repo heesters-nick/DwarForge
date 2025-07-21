@@ -360,3 +360,28 @@ def cpu_write_worker(results_queue, error_queue, completion_queue, done_event, c
     finally:
         logger.info(f'Writer {process_name} shutting down')
         gc.collect()
+
+
+def read_tile_data(filepath):
+    """
+    Read tile numbers from file.
+
+    Args:
+        filepath (str): path to file
+
+    Returns:
+        numpy.ndarray: array of tile strings
+    """
+    # Read all lines from the file
+    with open(filepath, 'r') as f:
+        lines = [line.strip() for line in f.readlines() if line.strip()]
+
+    # Create numpy array
+    tile_data = np.array(lines)
+
+    # If array is empty, return empty array
+    if tile_data.size == 0:
+        return tile_data
+
+    # Return array (will be 0D for single entry, 1D for multiple entries)
+    return tile_data

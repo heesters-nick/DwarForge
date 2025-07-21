@@ -20,14 +20,18 @@ EPSILON = 1e-8
 
 from logging_setup import setup_logger  # noqa: E402
 
+logging.getLogger('transformers').setLevel(logging.ERROR)
+logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
+logging.getLogger('zoobot').setLevel(logging.WARNING)
+
 setup_logger(
     log_dir='./logs',
-    name='zoobot_desi_latents_v2',
+    name='zoobot_mto_latents_prep_v1',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
 
-NUM_CORES = 6
+NUM_CORES = 4
 DEVICE_STR = 'cuda' if torch.cuda.is_available() else 'cpu'  # Store as string for workers
 DEVICE = torch.device(DEVICE_STR)
 EPSILON = 1e-8
@@ -74,8 +78,8 @@ def preprocess_cutout(
         elif np.count_nonzero(cutout_green > 1e-10) == 0:
             cutout_green = (cutout_red + cutout_blue) / 2
         elif np.count_nonzero(cutout_blue > 1e-10) == 0:
-            cutout_blue = cutout_red
-            cutout_red = (cutout_red + cutout_green) / 2
+            cutout_blue = cutout_green
+            cutout_green = (cutout_red + cutout_blue) / 2
 
     # stack the channels in the order red, green, blue
     cutout_prep = np.stack([cutout_red, cutout_green, cutout_blue], axis=-1)
@@ -391,7 +395,7 @@ def process_single_tile(args):
     global worker_model
 
     # 1. Unpack arguments (model_name and device_str are removed)
-    tile, tile_objects_df, base_path, preprocessing_params = args
+    tile, tile_objects_df, base_path, preprocessing_params, inference_mode = args
     tile_formatted = str(tile)
     tile_path = (
         f'{base_path}/{tile_formatted}/gri/{tile_formatted}_matched_cutouts_full_res_final.h5'
@@ -405,7 +409,10 @@ def process_single_tile(args):
         # Using print as logger might not be configured per-worker easily
         print(f'ERROR: {error_message}')
         # Define expected metadata keys for empty return
-        metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'z', 'zerr']
+        if inference_mode == 'all_mto':
+            metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'zoobot_pred', 'zoobot_pred_v2']
+        else:
+            metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'z', 'zerr']
         return {
             'latent_vectors': np.empty((0, 640), dtype=np.float32),  # Specify shape and dtype
             'metadata': {
@@ -429,7 +436,10 @@ def process_single_tile(args):
 
     # Initialize results for this tile
     # Define expected metadata keys upfront
-    metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'z', 'zerr']
+    if inference_mode == 'all_mto':
+        metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'zoobot_pred', 'zoobot_pred_v2']
+    else:
+        metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'z', 'zerr']
     tile_latent_vectors_list = []  # Use a list to append results
     tile_metadata_list = {key: [] for key in metadata_keys}  # List for each metadata key
 
@@ -510,6 +520,8 @@ def process_single_tile(args):
                 preprocessed_images_clean = np.nan_to_num(
                     preprocessed_images, nan=0.0, posinf=0.0, neginf=0.0
                 )
+                # Model expects values between 0 and 1
+                # preprocessed_images_clean = np.clip(preprocessed_images_clean, 0, 1)
 
                 # 5. Run inference for this tile's images
                 batch_vectors = run_inference(
@@ -532,8 +544,16 @@ def process_single_tile(args):
                 tile_metadata_list['ra'].append(valid_catalog_objects_sorted['ra'].values)
                 tile_metadata_list['dec'].append(valid_catalog_objects_sorted['dec'].values)
                 tile_metadata_list['tile'].append(np.full(n_valid, tile))
-                tile_metadata_list['z'].append(valid_catalog_objects_sorted['z'].values)
-                tile_metadata_list['zerr'].append(valid_catalog_objects_sorted['zerr'].values)
+                if inference_mode == 'all_mto':
+                    tile_metadata_list['zoobot_pred'].append(
+                        valid_catalog_objects_sorted['zoobot_pred'].values
+                    )
+                    tile_metadata_list['zoobot_pred_v2'].append(
+                        valid_catalog_objects_sorted['zoobot_pred_v2'].values
+                    )
+                else:
+                    tile_metadata_list['z'].append(valid_catalog_objects_sorted['z'].values)
+                    tile_metadata_list['zerr'].append(valid_catalog_objects_sorted['zerr'].values)
                 objects_processed_in_tile = n_valid
 
                 # Cleanup memory
@@ -578,7 +598,7 @@ def process_single_tile(args):
             # Define empty array types correctly
             if key == 'unique_id':
                 dtype = np.int64
-            elif key in ['ra', 'dec', 'z', 'zerr']:
+            elif key in ['ra', 'dec', 'z', 'zerr', 'zoobot_pred', 'zoobot_pred_v2']:
                 dtype = np.float64
             else:
                 dtype = object  # Tile will be object type
@@ -600,6 +620,7 @@ def process_objects_with_model_parallel(
     base_path: str = '/projects/unions/ssl/data/raw/tiles/dwarforge',
     preprocessing_params: Optional[Dict[str, Any]] = None,
     num_workers: int = NUM_CORES,  # Use global NUM_CORES
+    inference_mode: str = 'desi_unions_matches',
 ) -> Dict[str, int]:
     """
     Processes objects in parallel using multiple workers with initializer for model loading.
@@ -612,12 +633,28 @@ def process_objects_with_model_parallel(
     logger.info(f'Using device for workers: {DEVICE_STR}')
     logger.info('Loading catalog...')
     try:
-        catalog = pd.read_csv(catalog_path, low_memory=False)
+        catalog_name, catalog_extension = os.path.splitext(catalog_path)
+        if catalog_extension == '.csv':
+            catalog = pd.read_csv(catalog_path, low_memory=False)
+        elif catalog_extension == '.parquet':
+            catalog = pd.read_parquet(catalog_path)
+        else:
+            logger.error(f'Failed to load catalog. File type {catalog_extension} not supported.')
     except Exception as e:
         logger.error(f"Failed to load catalog '{catalog_path}': {e}")
         raise
 
-    required_cols = ['tile', 'unique_id', 'ra', 'dec', 'z', 'zerr']  # Ensure these match catalog
+    if inference_mode == 'all_mto':
+        required_cols = [
+            'tile',
+            'unique_id',
+            'ra',
+            'dec',
+            'zoobot_pred',
+            'zoobot_pred_v2',
+        ]  # Ensure these match catalog
+    else:
+        required_cols = ['tile', 'unique_id', 'ra', 'dec', 'z', 'zerr']
     missing_cols = [col for col in required_cols if col not in catalog.columns]
     if missing_cols:
         raise ValueError(f'Required columns missing in catalog: {", ".join(missing_cols)}')
@@ -633,7 +670,7 @@ def process_objects_with_model_parallel(
         preprocessing_params = {
             'replace_anomaly': True,
             'scaling_type': 'asinh',
-            'mode': 'vis',
+            'mode': 'training',
             'stretch': 125,
             'Q': 7.0,
             'gamma': 0.25,
@@ -653,16 +690,20 @@ def process_objects_with_model_parallel(
     for tile, tile_objects_df in tile_groups:
         args = (
             tile,
-            tile_objects_df.copy(),  # Pass a copy to potentially avoid issues if df is modified? (optional safety)
+            tile_objects_df.copy(),
             base_path,
             preprocessing_params,
+            inference_mode,
         )
         worker_args.append(args)
 
     # Initialize result accumulators
     all_latent_vectors_list: List[np.ndarray] = []
     # Define expected metadata keys based on process_single_tile return
-    metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'z', 'zerr']
+    if inference_mode == 'all_mto':
+        metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'zoobot_pred', 'zoobot_pred_v2']
+    else:
+        metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'z', 'zerr']
     all_metadata_accum_lists = {key: [] for key in metadata_keys}
 
     total_objects_processed_accum = 0  # Use a separate accumulator for the counter
@@ -689,6 +730,7 @@ def process_objects_with_model_parallel(
         ) as pool:  # Pass initializer and its args
             # Use imap_unordered for potentially better load balancing
             results_iterator = pool.imap_unordered(process_single_tile, worker_args)
+
             # Set total to the number of objects, unit to 'obj'
             pbar = tqdm(total=total_objects_in_catalog, desc='Processing Objects', unit='obj')
             # Process results as they become available
@@ -733,14 +775,11 @@ def process_objects_with_model_parallel(
 
     except Exception as pool_error:
         logger.error(f'An error occurred with the multiprocessing pool: {pool_error}')
-        if 'pbar' in locals() and pbar:  # Close pbar if it exists on error
-            pbar.close()
+        # if 'pbar' in locals() and pbar:  # Close pbar if it exists on error
+        #     pbar.close()
         raise  # Re-raise the error for now
 
     logger.info('Worker pool finished.')
-
-    total_objects_processed = total_objects_processed_accum
-    total_objects_not_found = total_objects_not_found_accum
 
     # 5. Consolidate final results
     logger.info('Concatenating final results...')
@@ -758,7 +797,7 @@ def process_objects_with_model_parallel(
             # Determine appropriate empty dtype based on key
             if key == 'unique_id':
                 dtype = np.int64
-            elif key in ['ra', 'dec', 'z', 'zerr']:
+            elif key in ['ra', 'dec', 'z', 'zerr', 'zoobot_pred', 'zoobot_pred_v2']:
                 dtype = np.float64
             elif key == 'tile':
                 dtype = object  # Tiles are likely strings/objects
@@ -797,23 +836,15 @@ def process_objects_with_model_parallel(
                     )
                     continue  # Skip saving this inconsistent key
 
-                # --- Simplified String/Object Saving ---
-                if (
-                    data.dtype == object or data.dtype.kind in 'SU'
-                ):  # Check for object or string types (S=bytes, U=unicode)
-                    logger.debug(f"Saving '{key}' as variable-length string.")
+                if data.dtype == object or data.dtype.kind in 'SU':
+                    logger.debug(f"Saving '{key}' as string data (letting h5py decide format).")
                     try:
-                        # Ensure all elements are explicitly converted to Python strings
-                        str_data = data.astype(str)
-                        # Use the special dtype for variable-length UTF-8 strings
-                        dt = h5py.special_dtype(vlen=str)
-                        out_file.create_dataset(key, data=str_data, dtype=dt)
+                        data = data.astype(h5py.string_dtype(encoding='utf-8'))
+                        out_file.create_dataset(key, data=data)
                         logger.debug(f"Successfully saved '{key}'.")
-                    except Exception as e_vlen:
-                        logger.error(
-                            f"!!! FAILED to save string/object array '{key}' as vlen strings: {e_vlen}"
-                        )
-                        # Optionally log more details about the data if it fails
+                    except Exception as e_str:
+                        # Broader exception catch in case direct saving fails for other reasons
+                        logger.error(f"!!! FAILED to save string/object array '{key}': {e_str}")
                         logger.error(f"Data sample for failed key '{key}': {data[:5]}")
 
                 # --- Numerical Data Saving ---
@@ -886,9 +917,12 @@ if __name__ == '__main__':
     data_dir = '/arc/projects/unions/ssl/data/raw/tiles/dwarforge'
     table_dir = '/arc/home/heestersnick/dwarforge/tables'
     output_dir = '/arc/home/heestersnick/dwarforge/desi'
-    desi_unions_path = os.path.join(table_dir, 'all_desi_unions_matched.csv')
+    desi_unions_path = os.path.join(table_dir, 'unions_master_v2.parquet')
 
     os.makedirs(output_dir, exist_ok=True)
+
+    # define inference mode
+    inference_mode = 'all_mto'  # 'all_mto', 'desi_unions_matches'
 
     # Define preprocessing params
     pp_params = {
@@ -907,12 +941,13 @@ if __name__ == '__main__':
         stats = process_objects_with_model_parallel(
             catalog_path=desi_unions_path,
             output_path=os.path.join(
-                output_dir, 'desi_unions_latent_parallel_v2.h5'
+                output_dir, 'all_mto_latent_gri_prep_v1.h5'
             ),  # Changed output filename slightly
             model_name=MODEL_NAME,  # Pass the name, not the loaded model
             base_path=data_dir,
             preprocessing_params=pp_params,
             num_workers=NUM_CORES,  # Explicitly pass number of workers
+            inference_mode=inference_mode,
         )
         logger.info('Parallel processing completed successfully!')
 
@@ -923,4 +958,4 @@ if __name__ == '__main__':
         # stats = None # Or handle partial results if needed
 
     end_time = time.time()
-    logger.info(f'Total execution time: {(end_time - start_time)/60/60:.2f} hours.')
+    logger.info(f'Total execution time: {(end_time - start_time) / 60 / 60:.2f} hours.')

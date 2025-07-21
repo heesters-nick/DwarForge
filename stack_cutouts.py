@@ -25,7 +25,7 @@ from logging_setup import setup_logger
 
 setup_logger(
     log_dir='./logs',
-    name='inference_test',
+    name='inference_missing_v1',
     logging_level=logging.INFO,
 )
 logger = logging.getLogger()
@@ -60,7 +60,7 @@ from utils import (  # noqa: E402
     tile_str,
     update_available_tiles,
 )
-from zoobot_utils import ZooBot_lightning, get_dwarf_predictions, load_model  # noqa: E402
+from zoobot_utils import ZooBot_lightning_v1, get_dwarf_predictions, load_model  # noqa: E402
 
 warnings.filterwarnings('ignore', message="'datfix' made the change", append=True)
 warnings.filterwarnings(
@@ -1065,7 +1065,7 @@ def process_worker(
     logger.debug(f'Processing worker {worker_id} started')
 
     if inference:
-        model = ZooBot_lightning(**hparams)  # type: ignore
+        model = ZooBot_lightning_v1(**hparams)  # type: ignore
         model.load_state_dict(model_state_dict)  # type: ignore
         model.freeze()
         model.eval()

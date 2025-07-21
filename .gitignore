@@ -17,7 +17,7 @@ desi/
 tables/all_desi_unions_matched.csv
 notebooks/inference.ipynb
 inference-checkpoint.ipynb
-test_output/
+test_results/
 credentials*
 tables/dwarfs_gri_w_group_flag.csv
 tables/elves_host_info.csv
@@ -30,3 +30,7 @@ tables/tiles_gri_w_group_flag.csv
 data_cutouts_gri/
 train_cutouts_gri/
 data_cutouts_r/
+notebooks/*log
+failed_tiles.txt
+gpu_test*
+inference_summary*
