@@ -1,0 +1,169 @@
+# configs/default.yaml
+# Single-file config for DwarForge. Set machine below and adjust paths if needed.
+machine: local   # canfar | narval | local
+
+logging:
+  name: dwarforge_test_local_coord
+  level: INFO
+
+monitoring:
+  memory:
+    enable: true
+    interval_s: 20  # check memory usage every N seconds
+    aggregation_s: 360  # aggregate over this many seconds
+  progress:
+    database_name: "progress_test_coord.db"   # choose a new name per run if you want a fresh DB
+    # **** CAREFUL **** 
+    resume: false  # if false existing database and logs with the specified names will be overwritten
+
+runtime:
+  # Processing & scheduling
+  num_cores: 10         # number of physical cores to use
+  prefetch_factor: 2    # number of prefetched tiles per core
+
+  # Bands & run mode
+  anchor_band: "cfis_lsb-r"
+  considered_bands: ["cfis-u", "whigs-g", "cfis_lsb-r", "ps-i", "wishes-z"]
+  use_full_resolution: false  # if true, download full resolution even if rebinned version exists
+  process_all_available: false  # process all bands, else only tiles available in anchor_band
+  process_only_known_dwarfs: false
+
+tiles:
+  update_tiles: false
+  build_new_kdtree: false   # if true, build kd-tree after (re)checking tiles
+  show_tile_statistics: true
+  band_constraint: 1        # min bands for a tile to qualify
+
+detection:
+  mu_limit: 22.0
+  re_limit: 1.6
+  mto:
+    script_path: "src/dwarforge/mto.py"
+    with_segmap: true
+    move_factor: 0.39
+    min_distance: 0.0
+
+cutouts:
+  create: true
+  plot_random: false
+  size_px: 64
+  segmentation_mode: "concatenate"   # concatenate | mask | none
+
+inputs:
+  # Choose the input source
+  source: "tiles"            # all_available | tiles | coordinates | dataframe
+  # Pairs: [[x1, y1], [x2, y2], ...]
+  tiles:
+    - [217, 292]
+    - [234, 295]
+
+  # Pairs: [[ra1, dec1], [ra2, dec2], ...]
+  coordinates:
+    - [227.3042, 52.5285]
+    - [231.4445, 52.4447]
+
+  dataframe:
+    path: ""                         # CSV with RA/Dec/ID columns
+    columns:
+      ra: "ra"
+      dec: "dec"
+      id: "ID"
+
+catalog:
+  dwarf:
+    path: "all_known_dwarfs_v3_processed.csv"
+    columns:
+      ra: "ra"
+      dec: "dec"
+      id: "ID"
+
+paths_common:
+  # These are joined under root_dir_main
+  table_dirname:     "tables"
+  tile_info_dirname: "tile_info"
+  figure_dirname:    "figures"
+  logs_dirname:      "logs"
+  database_dirname:  "databases"
+
+paths_by_machine:
+  canfar:
+    root_dir_main: "/arc/home/heestersnick/dwarforge"
+    root_dir_data: "/arc/projects/unions"
+    redshift_class_catalog: "/arc/projects/unions/catalogues/redshifts/redshifts-2024-05-07.parquet"
+    download_directory: "/arc/projects/unions/ssl/data/raw/tiles/dwarforge"
+    cutout_directory: "/arc/home/heestersnick/dwarforge/cutouts"
+
+  narval:
+    root_dir_main: "/home/heesters/projects/def-sfabbro/heesters/github/TileSlicer"
+    root_dir_data: "/home/heesters/projects/def-sfabbro/heesters/data/unions"
+    redshift_class_catalog: "/home/heesters/projects/def-sfabbro/heesters/data/unions/catalogs/labels/redshifts/redshifts-2024-05-07.parquet"
+    download_directory: "/home/heesters/projects/def-sfabbro/heesters/data/unions/tiles"
+    cutout_directory: "/home/heesters/projects/def-sfabbro/heesters/data/unions/cutouts"
+
+  local:
+    root_dir_main: "/home/nick/astro/DwarForge"
+    root_dir_data: "/home/nick/astro/DwarForge/data"
+    redshift_class_catalog: "/home/nick/astro/dwarf_visualization/tables/redshifts-2024-05-07.parquet"
+    download_directory: "/home/nick/astro/DwarForge/data"
+    cutout_directory: "/home/nick/astro/DwarForge/cutouts"
+
+bands:
+  cfis-u:
+    name: "CFIS"
+    band: "u"
+    vos: "vos:cfis/tiles_DR5"
+    suffix: ".u.fits"
+    delimiter: "."
+    fits_ext: 0
+    zfill: 3
+    zp: 30.0
+
+  whigs-g:
+    name: "calexp-CFIS"
+    band: "g"
+    vos: "vos:cfis/whigs/stack_images_CFIS_scheme"
+    suffix: ".fits"
+    delimiter: "_"
+    fits_ext: 1
+    zfill: 0
+    zp: 27.0
+
+  cfis_lsb-r:
+    name: "CFIS_LSB"
+    band: "r"
+    vos: "vos:cfis/tiles_LSB_DR5"
+    suffix: ".r.fits"
+    delimiter: "."
+    fits_ext: 0
+    zfill: 3
+    zp: 30.0
+
+  ps-i:
+    name: "PS-DR3"
+    band: "i"
+    vos: "vos:cfis/panstarrs/DR3/tiles"
+    suffix: ".i.fits"
+    delimiter: "."
+    fits_ext: 0
+    zfill: 3
+    zp: 30.0
+
+  wishes-z:
+    name: "WISHES"
+    band: "z"
+    vos: "vos:cfis/wishes_1/coadd"
+    suffix: ".z.fits"
+    delimiter: "."
+    fits_ext: 1
+    zfill: 0
+    zp: 27.0
+
+  ps-z:
+    name: "PSS.DR4"
+    band: "ps-z"
+    vos: "vos:cfis/panstarrs/DR4/resamp"
+    suffix: ".z.fits"
+    delimiter: "."
+    fits_ext: 0
+    zfill: 3
+    zp: 30.0

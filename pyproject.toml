@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---- Project metadata & dependencies ----
+[project]
+name = "dwarforge"
+version = "0.1.0"
+description = "Dwarf galaxy detection and classification pipeline"
+readme = "README.md"
+requires-python = ">=3.11.5"
+license = { text = "MIT" }
+authors = [{ name = "Nick Heesters" }]
+
+# Runtime dependencies (imported by your package at run time)
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "astroquery",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "opencv-python",
+    "astropy",
+    "pandas",
+    "scikit-learn",
+    "scikit-image",
+    "photutils",
+    "sep",
+    "joblib",
+    "h5py",
+    "astride",
+    "vos",
+    "psutil",
+    "pyarrow",
+    "concurrent-log-handler",
+    "PyWavelets",
+    "tqdm",
+    "google-auth-oauthlib>=1.0.0",
+    "google-auth-httplib2>=0.1.0",
+    "google-api-python-client>=2.100.0",
+    "oauth2client>=4.1.3",
+    "tenacity>=8.2.0",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "timm",
+    "pyro-ppl",
+    "pytorch-lightning",
+    "zoobot",
+]
+
+# Optional dependency groups for dev tooling, tests, docs, etc.
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "black"]
+
+# ---- Tell setuptools where to find your packages (src/ layout) ----
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true

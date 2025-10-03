@@ -34,3 +34,6 @@ notebooks/*log
 failed_tiles.txt
 gpu_test*
 inference_summary*
+src/dwarforge.egg-info/
+.vscode/
+.ruff_cache/

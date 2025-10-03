@@ -30,3 +30,4 @@ timm
 pyro-ppl
 pytorch-lightning
 zoobot
+pydantic
