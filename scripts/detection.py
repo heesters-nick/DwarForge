@@ -715,6 +715,7 @@ if __name__ == '__main__':
         np.float32(elapsed_string.split(':')[1]),
         np.float32(elapsed_string.split(':')[2]),
     )
+
     logger.info(
         f'Done! Execution took {hours} hours, {minutes} minutes, and {seconds:.2f} seconds.'
     )
