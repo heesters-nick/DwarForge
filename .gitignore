@@ -37,3 +37,5 @@ inference_summary*
 src/dwarforge.egg-info/
 .vscode/
 .ruff_cache/
+ruff.toml
+requirements.txt
