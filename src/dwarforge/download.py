@@ -2,6 +2,9 @@ import logging
 import queue
 import threading
 import time
+from multiprocessing import JoinableQueue
+from multiprocessing.synchronize import Event, Lock
+from pathlib import Path
 
 from dwarforge.tile_cutter import download_tile_one_band, tile_band_specs
 from dwarforge.track_progress import update_cutout_info
@@ -13,18 +16,18 @@ QUEUE_TIMEOUT = 1  # seconds
 
 
 def download_worker(
-    database,
-    download_queue,
-    process_queue,
-    required_bands,
-    band_dictionary,
-    download_dir,
-    db_lock,
-    shutdown_flag,
-    queue_lock,
-    processed_in_current_run,
-    downloaded_bands,  # shared dictionary for tracking across threads
-    full_res,
+    database: Path,
+    download_queue: JoinableQueue,
+    process_queue: JoinableQueue,
+    required_bands: list[str],
+    band_dictionary: dict,
+    download_dir: Path,
+    db_lock: Lock,
+    shutdown_flag: Event,
+    queue_lock: Lock,
+    processed_in_current_run: dict,
+    downloaded_bands: dict,
+    full_res: bool,
 ):
     """Worker that downloads data and tracks completion per tile"""
     worker_id = threading.get_ident()
@@ -78,7 +81,7 @@ def download_worker(
                     logger.debug(f'Tile {tile} has bands: {downloaded_bands[tile_string]["bands"]}')
 
                     # Check if all required bands are present
-                    if downloaded_bands[tile_string]['bands'] == required_bands:
+                    if downloaded_bands[tile_string]['bands'] == set(required_bands):
                         logger.info(
                             f'Tile {tile} downloaded in all bands. Queueing for processing.'
                         )

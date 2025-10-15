@@ -28,6 +28,28 @@ runtime:
   process_all_available: false  # process all bands, else only tiles available in anchor_band
   process_only_known_dwarfs: false
 
+combination:
+  bands_to_combine: ["whigs-g", "cfis_lsb-r", "ps-i"]
+  max_match_sep_arcsec: 10.0
+  negatives_per_positive: 5
+  accumulate_lsb_to_h5: false
+  aggregate_cutouts: false
+  aggregate_objects_per_file: 5000
+  combine_cutouts: false
+  process_groups_only: false
+  group_tiles_csv: ""
+  lsb_cutout_path: "lsb_gri.h5"
+
+h5_aggregation:
+  objects_per_file: 5000
+  label_filters: [0]        # use ["nan", 0, 1] or null for all
+  in_file_suffix: "matched_cutouts_full_res"
+  out_file_prefix: "combined_cutouts"
+  number_of_tiles: 500
+  preprocess_cutouts: true
+  preprocessing_mode: "vis" # "vis" or "training"
+  tile_df_file: "dwarf_tiles_gri.csv"
+
 tiles:
   update_tiles: false
   build_new_kdtree: false   # if true, build kd-tree after (re)checking tiles
@@ -46,8 +68,8 @@ detection:
 cutouts:
   create: true
   plot_random: false
-  size_px: 64
-  segmentation_mode: "concatenate"   # concatenate | mask | none
+  size_px: 256
+  segmentation_mode: "none"   # concatenate | mask | none
 
 inputs:
   # Choose the input source
@@ -84,6 +106,7 @@ paths_common:
   figure_dirname:    "figures"
   logs_dirname:      "logs"
   database_dirname:  "databases"
+  aggregate_dirname: "combined_cutouts"
 
 paths_by_machine:
   canfar:

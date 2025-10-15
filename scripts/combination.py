@@ -1,69 +1,50 @@
-import argparse
 import glob
 import logging
 import multiprocessing
-import os  # noqa: E402
+import os
 import queue
 import threading
 import time
-import warnings  # noqa: E402
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import timedelta
-from multiprocessing import (
-    Manager,  # noqa: E402
-)
+from multiprocessing import Event, JoinableQueue, Lock, Manager
+from multiprocessing.synchronize import Event as EventT
+from multiprocessing.synchronize import Lock as LockT
 from pathlib import Path
 
 import h5py
 import numpy as np
 import pandas as pd
-import torch
+import yaml
 from astropy.coordinates import SkyCoord
+from dwarforge.config import ensure_runtime_dirs, load_settings, settings_to_jsonable
+from dwarforge.download import download_worker
+from dwarforge.import_utils import input_to_tile_list, query_availability
 from dwarforge.logging_setup import setup_logger
-from scipy.spatial import cKDTree
-from tqdm import tqdm
-
-setup_logger(
-    log_dir='./logs',
-    name='inference_missing_v1',
-    logging_level=logging.INFO,
-)
-logger = logging.getLogger()
-
-import psutil  # noqa: E402
-from dwarforge.download import download_worker  # noqa: E402
-from dwarforge.kd_tree import build_tree  # noqa: E402
-from dwarforge.make_rbg import preprocess_cutout  # noqa: E402
-from dwarforge.postprocess import (  # noqa: E402
+from dwarforge.postprocess import (
     load_segmap,
     make_cutouts,
     match_coordinates_across_bands,
     read_band_data,
     save_to_h5,
 )
-from dwarforge.shutdown import GracefulKiller  # noqa: E402
-from dwarforge.tile_cutter import tile_finder  # noqa: E402
-from dwarforge.track_progress import (  # noqa: E402
+from dwarforge.shutdown import GracefulKiller
+from dwarforge.track_progress import (
     get_progress_summary,
     get_unprocessed_jobs,
     init_cutouts_db,
     update_cutout_info,
 )
-from dwarforge.utils import (  # noqa: E402
+from dwarforge.utils import (
     TileAvailability,
-    extract_tile_numbers,
     get_dwarf_tile_list,
-    load_available_tiles,
     open_fits,
+    purge_previous_run,
     tile_str,
-    update_available_tiles,
 )
-from dwarforge.zoobot_utils import (  # noqa: E402
-    ZooBot_lightning_v1,
-    get_dwarf_predictions,
-    load_model,
-)
-from vos import Client  # noqa: E402
+from scipy.spatial import cKDTree
+from tqdm import tqdm
 
 warnings.filterwarnings('ignore', message="'datfix' made the change", append=True)
 warnings.filterwarnings(
@@ -73,7 +54,7 @@ warnings.filterwarnings(
     'ignore', category=RuntimeWarning, message='divide by zero encountered in log10'
 )
 
-client = Client()
+logger = logging.getLogger(__name__)
 
 # To work with the client you need to get CANFAR X509 certificates
 # Run these lines on the command line:
@@ -85,482 +66,10 @@ client = Client()
 # photometric bands in the
 # survey and their file systems
 
-band_dictionary = {
-    'cfis-u': {
-        'name': 'CFIS',
-        'band': 'u',
-        'vos': 'vos:cfis/tiles_DR5/',
-        'suffix': '.u.fits',
-        'delimiter': '.',
-        'fits_ext': 0,
-        'zfill': 3,
-        'zp': 30.0,
-    },
-    'whigs-g': {
-        'name': 'calexp-CFIS',
-        'band': 'g',
-        'vos': 'vos:cfis/whigs/stack_images_CFIS_scheme/',
-        'suffix': '.fits',
-        'delimiter': '_',
-        'fits_ext': 1,
-        'zfill': 0,
-        'zp': 27.0,
-    },
-    'cfis_lsb-r': {
-        'name': 'CFIS_LSB',
-        'band': 'r',
-        'vos': 'vos:cfis/tiles_LSB_DR5/',
-        'suffix': '.r.fits',
-        'delimiter': '.',
-        'fits_ext': 0,
-        'zfill': 3,
-        'zp': 30.0,
-    },
-    'ps-i': {
-        'name': 'PS-DR3',
-        'band': 'i',
-        'vos': 'vos:cfis/panstarrs/DR3/tiles/',
-        'suffix': '.i.fits',
-        'delimiter': '.',
-        'fits_ext': 0,
-        'zfill': 3,
-        'zp': 30.0,
-    },
-    'wishes-z': {
-        'name': 'WISHES',
-        'band': 'z',
-        'vos': 'vos:cfis/wishes_1/coadd/',
-        'suffix': '.z.fits',
-        'delimiter': '.',
-        'fits_ext': 1,
-        'zfill': 0,
-        'zp': 27.0,
-    },
-    'ps-z': {
-        'name': 'PSS.DR4',
-        'band': 'ps-z',
-        'vos': 'vos:cfis/panstarrs/DR4/resamp/',
-        'suffix': '.z.fits',
-        'delimiter': '.',
-        'fits_ext': 0,
-        'zfill': 3,
-        'zp': 30.0,
-    },
-}
 
-# define the bands to consider
-considered_bands = ['whigs-g', 'cfis_lsb-r', 'ps-i']
-# create a dictionary with the bands to consider
-band_dict_incl = {key: band_dictionary.get(key) for key in considered_bands}
-
-### pipeline options ###
-
-# list of bands for which detections should be matched and cutouts combined
-fuse_bands = ['whigs-g', 'cfis_lsb-r', 'ps-i']
-# process all available bands?
-process_all_available = True
-# combine cutouts?
-combine_cutouts = False
-# aggregate cutouts to larger files?
-aggregate_cutouts = False
-# retrieve from the VOSpace and update the currently available tiles; takes some time to run
-update_tiles = False
-# build kd tree with updated tiles otherwise use the already saved tree
-if update_tiles:
-    build_new_kdtree = True
-else:
-    build_new_kdtree = False
-# return the number of available tiles that are available in at least 5, 4, 3, 2, 1 bands
-at_least_key = False
-# show stats on currently available tiles, remember to update
-show_tile_statistics = True
-# define the minimum number of bands that should be available for a tile
-band_constraint = 3
-# print per tile availability
-print_per_tile_availability = False
-# how to treat the segmentation mask
-segmentation_mode = None  # 'concatenate', 'multiply', None
-# process only tiles with known dwarfs
-process_only_known_dwarfs = False
-# cutout objects?
-cutout_objects = True
-# accumulate all lsb cutouts to a single file?
-accumulate_lsb_to_h5 = False
-# cutout size
-cutout_size = 256
-# use original resolution?
-use_full_resolution = True
-# process only group tiles?
-process_groups_only = False
-# apply trained model on the data?
-run_inference = True
-# maximum on-sky separation to match detections across different bands in arcsec
-maximum_match_separation = 10.0
-# number of negative examples (nearest non-dwarf neighbors) for each positive example (dwarf)
-negatives_per_positive = 5
-
-### Multiprocessing constants
-NUM_CORES = psutil.cpu_count(logical=False)  # Number of physical cores
-PREFETCH_FACTOR = 3  # Number of prefetched tiles per core
-### Inference
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-DTYPE = torch.float32
-model_name = 'epoch43_train_loss_0.0187_valid_loss_0.0285.ckpt'
-
-### paths ###
-platform = 'CANFAR'  #'CANFAR' #'Narval'
-if platform == 'CANFAR':
-    root_dir_main = '/arc/home/heestersnick/dwarforge'
-    root_dir_data = '/arc/projects/unions'
-    unions_detection_directory = os.path.join(
-        root_dir_data, 'catalogues/unions/GAaP_photometry/UNIONS2000'
-    )
-    redshift_class_catalog = os.path.join(
-        root_dir_data, 'catalogues/redshifts/redshifts-2024-05-07.parquet'
-    )
-    download_directory = os.path.join(root_dir_data, 'ssl/data/raw/tiles/dwarforge')
-    cutout_directory = os.path.join(root_dir_main, 'cutouts')
-    os.makedirs(cutout_directory, exist_ok=True)
-elif platform == 'LOCAL':
-    root_dir_main = '/home/nick/astro/DwarForge'
-    root_dir_data = '/home/nick/astro/DwarForge/data'
-    download_directory = '/media/nick/Passport/UNIONS'
-else:  # assume compute canada for now
-    root_dir_main = '/home/heesters/projects/def-sfabbro/heesters/github/TileSlicer'
-    root_dir_data_ashley = '/home/heesters/projects/def-sfabbro/a4ferrei/data'
-    root_dir_data = '/home/heesters/projects/def-sfabbro/heesters/data/unions'
-    unions_detection_directory = os.path.join(root_dir_data, 'catalogs/GAaP/UNIONS2000')
-    redshift_class_catalog = os.path.join(
-        root_dir_data, 'catalogs/labels/redshifts/redshifts-2024-05-07.parquet'
-    )
-    download_directory = os.path.join(root_dir_data, 'tiles')
-    os.makedirs(download_directory, exist_ok=True)
-    cutout_directory = os.path.join(root_dir_data, 'cutouts')
-    os.makedirs(cutout_directory, exist_ok=True)
-
-# paths
-# define the root directory
-main_directory = root_dir_main
-data_directory = root_dir_data
-table_directory = os.path.join(main_directory, 'tables')
-os.makedirs(table_directory, exist_ok=True)
-# define the path to the catalog containing known lenses
-lens_catalog = os.path.join(table_directory, 'known_lenses.parquet')
-# define the path to the master catalog that accumulates information about the cut out objects
-catalog_master = os.path.join(table_directory, 'cutout_cat_master.parquet')
-# define the path to the catalog containing known dwarf galaxies
-dwarf_catalog = os.path.join(table_directory, 'all_known_dwarfs_v3_processed.csv')
-# g,r,i tiles that are near massive galaxies
-tiles_in_groups = os.path.join(table_directory, 'tiles_gri_group.csv')
-# define path to file containing the processed h5 files
-processed_file = os.path.join(table_directory, 'processed.txt')
-# define catalog file
-# catalog_file = 'all_known_dwarfs.csv'
-# catalog_script = pd.read_csv(os.path.join(table_directory, catalog_file))
-# define the keys for ra, dec, and id in the catalog
-ra_key_script, dec_key_script, id_key_script = 'ra', 'dec', 'ID'
-# define where the information about the currently available tiles should be saved
-tile_info_directory = os.path.join(main_directory, 'tile_info/')
-os.makedirs(tile_info_directory, exist_ok=True)
-# define where figures should be saved
-figure_directory = os.path.join(main_directory, 'figures/')
-os.makedirs(figure_directory, exist_ok=True)
-# define where the logs should be saved
-log_directory = os.path.join(main_directory, 'logs/')
-os.makedirs(log_directory, exist_ok=True)
-# define location where to store the aggregated h5 files
-aggregate_h5_directory = os.path.join(download_directory, 'combined_cutouts')
-# define where the databases should be saved
-database_directory = os.path.join(main_directory, 'databases')
-os.makedirs(database_directory, exist_ok=True)
-# define file path where to save the lsb cutouts
-accumulated_lsb_path = os.path.join(cutout_directory, 'lsb_gri.h5')
-# model directory
-model_dir = os.path.join(main_directory, 'models')
-os.makedirs(model_dir, exist_ok=True)
-path_to_model = os.path.join(model_dir, model_name)
-
-
-def query_availability(update, in_dict, at_least_key, show_stats, build_kdtree, tile_info_dir):
-    """
-    Gather information on the currently available tiles.
-
-    Args:
-        update (bool): update the available tiles
-        in_dict (dict): band dictionary
-        at_least_key (bool): print the number of tiles in at least (not exactly) 5, 4, ... bands
-        show_stats (bool): show stats on the currently available tiles
-        build_kdtree (bool): build a kd tree from the currently available tiles
-        tile_info_dir (str): path to save the tile information
-
-    Returns:
-        TileAvailability: availability of the tiles
-    """
-    # update information on the currently available tiles
-    if update:
-        update_available_tiles(tile_info_dir, in_dict)
-    # extract the tile numbers from the available tiles
-    all_bands = extract_tile_numbers(load_available_tiles(tile_info_dir, in_dict), in_dict)
-    # create the tile availability object
-    availability = TileAvailability(all_bands, in_dict, at_least_key)
-    # build the kd tree
-    if build_kdtree:
-        build_tree(availability.unique_tiles, tile_info_dir)
-    # show stats on the currently available tiles
-    if show_stats:
-        availability.stats()
-    return availability, all_bands
-
-
-def import_coordinates(coordinates, ra_key_default, dec_key_default, id_key_default):
-    """
-    Process coordinates provided from the command line.
-
-    Args:
-        coordinates (nested list): ra, dec coordinates
-        ra_key_default (str): default right ascention key
-        dec_key_default (str): default declination key
-        id_key_default (str): default ID key
-
-    Raises:
-        ValueError: error if the number of coordinates is not even
-
-    Returns:
-        tuple: dataframe, SkyCoord object of the coordinates
-    """
-    coordinates = coordinates[0]
-    if (len(coordinates) == 0) or len(coordinates) % 2 != 0:
-        raise ValueError('Provide even number of coordinates.')
-
-    ras, decs, ids = (
-        coordinates[::2],
-        coordinates[1::2],
-        list(np.arange(1, len(coordinates) // 2 + 1)),
-    )
-    ra_key, dec_key, id_key = ra_key_default, dec_key_default, id_key_default
-    df_coordinates = pd.DataFrame({id_key: ids, ra_key: ras, dec_key: decs})
-
-    formatted_coordinates = ' '.join([f'({ra}, {dec})' for ra, dec in zip(ras, decs)])
-    logging.info(f'Coordinates received from the command line: {formatted_coordinates}')
-    catalog = df_coordinates
-    coord_c = SkyCoord(catalog[ra_key].values, catalog[dec_key].values, unit='deg', frame='icrs')
-    return catalog, coord_c
-
-
-def import_dataframe(
-    dataframe_path, ra_key, dec_key, id_key, ra_key_default, dec_key_default, id_key_default
+def make_cutouts_for_band(
+    data_path: Path, tile: tuple[int, int], cut_size: int, seg_mode: str | None
 ):
-    """
-    Process a DataFrame provided from the command line.
-
-    Args:
-        dataframe_path (str): path to the DataFrame
-        ra_key (str): right ascention key
-        dec_key (str): declination key
-        id_key (str): ID key
-        ra_key_default (str): default right ascention key
-        dec_key_default (str): default declination key
-        id_key_default (str): default ID key
-
-    Returns:
-        tuple: dataframe, SkyCoord object of the coordinates
-    """
-    logging.info('Dataframe received from command line.')
-    catalog = pd.read_csv(dataframe_path)
-
-    if ra_key is None or dec_key is None or id_key is None:
-        ra_key, dec_key, id_key = ra_key_default, dec_key_default, id_key_default
-
-    if (
-        ra_key not in catalog.columns
-        or dec_key not in catalog.columns
-        or id_key not in catalog.columns
-    ):
-        logging.error(
-            'One or more keys not found in the DataFrame. Please provide the correct keys '
-            'for right ascention, declination and object ID \n'
-            'if they are not equal to the default keys: ra, dec, ID.'
-        )
-        return None, None
-
-    coord_c = SkyCoord(catalog[ra_key].values, catalog[dec_key].values, unit='deg', frame='icrs')
-
-    return catalog, coord_c
-
-
-def import_tiles(tiles, availability, band_constr):
-    """
-    Process tiles provided from the command line.
-
-    Args:
-        tiles (nested list): tile numbers
-        availability (TileAvailability): instance of the TileAvailability class
-        band_constr (int): minimum number of bands that should be available
-
-    Raises:
-        ValueError: provide two three digit numbers for each tile
-
-    Returns:
-        list: list of tiles that are available in r and at least two other bands
-    """
-    tiles = tiles[0]
-    if (len(tiles) == 0) or len(tiles) % 2 != 0:
-        raise ValueError('Provide two three digit numbers for each tile.')
-
-    tile_list = [tuple(tiles[i : i + 2]) for i in range(0, len(tiles), 2)]
-    logging.info(f'Tiles received from command line: {tiles}')
-
-    return [
-        tile
-        for tile in tile_list
-        if 'r' in availability.get_availability(tile)[0]
-        and len(availability.get_availability(tile)[1]) >= band_constr
-    ]
-
-
-def input_to_tile_list(
-    availability: TileAvailability,
-    band_constr: int,
-    coordinates=None,
-    dataframe_path=None,
-    tiles=None,
-    ra_key=None,
-    dec_key=None,
-    id_key=None,
-    tile_info_dir=None,
-    ra_key_default='ra',
-    dec_key_default='dec',
-    id_key_default='ID',
-):
-    """
-    Process the input to get a list of tiles that are available in r and at least two other bands.
-
-    Args:
-        availability (TileAvailability): instance of the TileAvailability class
-        band_constr (int): minimum number of bands that should be available
-        coordinates (nested list, optional): coordinates from the command line. Defaults to None.
-        dataframe_path (str, optional): path to dataframe. Defaults to None.
-        tiles (nested list, optional): tiles from the command line. Defaults to None.
-        ra_key (str, optional): right ascention key. Defaults to None.
-        dec_key (str_, optional): declination key. Defaults to None.
-        id_key (str, optional): ID key. Defaults to None.
-        tile_info_dir (str, optional): path to save the tile information. Defaults to None.
-        ra_key_default (str, optional): default right ascention key. Defaults to 'ra'.
-        dec_key_default (str, optional): default declination key. Defaults to 'dec'.
-        id_key_default (str, optional): default ID key. Defaults to 'ID'.
-
-    Returns:
-        list: list of tiles that are available in r and at least two other bands
-        catalog (dataframe): updated catalog with tile information
-    """
-
-    if coordinates is not None:
-        catalog, coord_c = import_coordinates(
-            coordinates, ra_key_default, dec_key_default, id_key_default
-        )
-    elif dataframe_path is not None:
-        catalog, coord_c = import_dataframe(
-            dataframe_path, ra_key, dec_key, id_key, ra_key_default, dec_key_default, id_key_default
-        )
-    elif tiles is not None:
-        return import_tiles(tiles, availability, band_constr), None, None
-    else:
-        logging.info('No coordinates or DataFrame provided. Processing all available tiles..')
-        ra_key, dec_key, id_key = ra_key_default, dec_key_default, id_key_default
-        return None, None, None
-
-    unique_tiles, tiles_x_bands, catalog = tile_finder(
-        availability,
-        catalog,
-        coord_c,
-        tile_info_dir,  # type: ignore
-        band_constr,
-    )
-
-    return unique_tiles, tiles_x_bands, catalog
-
-
-def combine_h5_files(source_dir, destination_dir, objects_per_file=1000):
-    """
-    Combine individual tile H5 files into larger files with a specified number of objects per file.
-
-    Args:
-    source_dir (str): Directory containing the individual tile H5 files.
-    destination_dir (str): Directory where the combined H5 files will be stored.
-    objects_per_file (int): Number of objects to store in each combined file (default: 1000).
-
-    Returns:
-    None
-    """
-    os.makedirs(destination_dir, exist_ok=True)
-
-    combined_data = {
-        'images': [],
-        'ra': [],
-        'dec': [],
-        'tile': [],
-        'known_id': [],
-        'mto_id': [],
-        'label': [],
-        'zspec': [],
-    }
-    file_counter = 1
-    object_counter = 0
-
-    for root, _, files in os.walk(source_dir):
-        for file in tqdm(files, desc='Processing files'):
-            if file.endswith('_matched_cutouts.h5'):
-                file_path = os.path.join(root, file)
-
-                with h5py.File(file_path, 'r') as f:
-                    num_objects = f['images'].shape[0]  # type: ignore
-                    for key in combined_data.keys():
-                        combined_data[key].extend(f[key][:])  # type: ignore
-
-                    object_counter += num_objects
-
-                if object_counter >= objects_per_file:
-                    # Write combined data to a new file
-                    output_file = os.path.join(destination_dir, f'combined_{file_counter:04d}.h5')
-                    with h5py.File(output_file, 'w') as f_out:
-                        for key, value in combined_data.items():
-                            if key == 'known_id':
-                                dt = h5py.special_dtype(vlen=str)
-                                f_out.create_dataset(key, data=value, dtype=dt)
-                            else:
-                                f_out.create_dataset(key, data=value)
-
-                        # Store band information
-                        f_out.create_dataset(
-                            'band_names',
-                            data=np.array(['whigs-g', 'cfis_lsb-r', 'ps-i'], dtype='S'),
-                        )
-
-                    # Reset combined_data and counters
-                    combined_data = {key: [] for key in combined_data}
-                    object_counter = 0
-                    file_counter += 1
-
-    # Write any remaining data
-    if object_counter > 0:
-        output_file = os.path.join(destination_dir, f'combined_{file_counter:04d}.h5')
-        with h5py.File(output_file, 'w') as f_out:
-            for key, value in combined_data.items():
-                if key == 'known_id':
-                    dt = h5py.special_dtype(vlen=str)
-                    f_out.create_dataset(key, data=value, dtype=dt)
-                else:
-                    f_out.create_dataset(key, data=value)
-
-            # Store band information
-            f_out.create_dataset(
-                'band_names', data=np.array(['whigs-g', 'cfis_lsb-r', 'ps-i'], dtype='S')
-            )
-
-    logger.info(f'Completed. Created {file_counter} combined files.')
-
-
-def make_cutouts_for_band(data_path, tile, cut_size, seg_mode):
     segmap = load_segmap(data_path)
     binned_data, binned_header = open_fits(data_path, fits_ext=0)
     path, extension = os.path.splitext(data_path)
@@ -600,7 +109,7 @@ def save_cutouts_to_h5(
     band_names,
     seg_mode,
     unique_id,
-    zoobot_pred,
+    zoobot_pred=None,
 ):
     try:
         dt = h5py.special_dtype(vlen=str)
@@ -740,20 +249,18 @@ def append_lsb_data(
 
 
 def process_tile(
-    tile,
-    parent_dir,
-    in_dict,
-    band_names,
-    cut_size,
-    seg_mode,
-    max_sep,
-    n_neighbors=10,
-    use_full_res=False,
-    accumulate_lsb=False,
-    lsb_file_path=None,
-    file_lock=None,
-    inference=False,
-    model=None,
+    tile: tuple[int, int],
+    parent_dir: Path,
+    in_dict: dict,
+    band_names: list[str],
+    cut_size: int,
+    seg_mode: str | None,
+    max_sep: float,
+    n_neighbors: int,
+    use_full_res: bool,
+    accumulate_lsb: bool,
+    lsb_file_path: Path,
+    file_lock: LockT | None,
 ):
     try:
         logger.info(f'Matching and combining detections in tile {tile_str(tile)}')
@@ -848,7 +355,7 @@ def process_tile(
                     ra=final_ras,
                     dec=final_decs,
                     segmap=segmap,
-                    cutout_size=cutout_size,
+                    cutout_size=cut_size,
                     seg_mode=seg_mode,
                 )
 
@@ -858,34 +365,6 @@ def process_tile(
         except Exception as e:
             logger.error(f'Error in cutout creation: {e}.')
             return 0
-
-        if inference:
-            start_rgb = time.time()
-            # make cutouts rgb-ready for inference
-            cutouts_rgb = np.zeros_like(final_cutouts, dtype=np.float32)
-            for i, cutout in enumerate(final_cutouts):
-                cutouts_rgb[i] = preprocess_cutout(cutout, mode='vis')
-            # make sure there are no nan values in the cutouts
-            cutouts_rgb = np.nan_to_num(cutouts_rgb, nan=0.0)
-            logger.debug(
-                f'Creating RGB images for tile {tile_dir} took {time.time() - start_rgb:.2f} seconds.'
-            )
-            start_inf = time.time()
-            # run inference
-            zoobot_predictions = get_dwarf_predictions(
-                model=model,
-                data=cutouts_rgb,
-                batch_size=cutouts_rgb.shape[0],
-                dtype=DTYPE,
-                device=DEVICE,  # type: ignore
-            )
-            logger.debug(
-                f'Inference on {cutouts_rgb.shape[0]} objects took {time.time() - start_inf:.2f} seconds.'
-            )
-            # add predictions to combined detection df
-            matched_df['zoobot_pred'] = zoobot_predictions
-        else:
-            zoobot_predictions = None
 
         # Process LSB objects
         lsb_indices = np.where(labels == 1)[0]  # Assuming 1 indicates LSB objects
@@ -943,7 +422,6 @@ def process_tile(
             band_names=band_names,
             seg_mode=seg_mode,
             unique_id=unique_id,
-            zoobot_pred=zoobot_predictions,
         )
         # save cross-matched detection dataframe
         matched_df.to_parquet(
@@ -972,16 +450,19 @@ def process_tile(
 
 
 def fuse_cutouts_parallel(
-    parent_dir,
-    tiles,
-    in_dict,
-    band_names=['whigs-g', 'cfis_lsb-r', 'ps-i'],
-    num_processes=None,
-    cut_objects=False,
-    cut_size=256,
-    seg_mode='concatenate',
-    max_sep=15.0,
-    n_neighbors=10,
+    parent_dir: Path,
+    tiles: list[tuple[int, int]],
+    in_dict: dict,
+    band_names: list[str],
+    num_processes: int,
+    cut_size: int,
+    seg_mode: str | None,
+    max_sep: float,
+    n_neighbors: int,
+    use_full_res: bool,
+    accumulate_lsb: bool,
+    lsb_file_path: Path,
+    file_lock: LockT | None,
 ):
     logger.info(f'Starting to fuse cutouts for {len(tiles)} tiles in the bands: {band_names}')
 
@@ -992,14 +473,18 @@ def fuse_cutouts_parallel(
         future_to_tile = {
             executor.submit(
                 process_tile,
-                tile,
-                parent_dir,
-                in_dict,
-                band_names,
-                cut_size,
-                seg_mode,
-                max_sep,
-                n_neighbors,
+                tile=tile,
+                parent_dir=parent_dir,
+                in_dict=in_dict,
+                band_names=band_names,
+                cut_size=cut_size,
+                seg_mode=seg_mode,
+                max_sep=max_sep,
+                n_neighbors=n_neighbors,
+                use_full_res=use_full_res,
+                accumulate_lsb=accumulate_lsb,
+                lsb_file_path=lsb_file_path,
+                file_lock=file_lock,
             ): tile
             for tile in tiles
         }
@@ -1023,26 +508,24 @@ def fuse_cutouts_parallel(
 
 
 def process_worker(
-    process_queue,
-    database,
-    band_dict,
-    required_bands,
-    download_dir,
-    db_lock,
-    all_downloads_complete,
-    shutdown_flag,
-    queue_lock,
-    processed_in_current_run,
-    cut_size=256,
-    seg_mode='concatenate',
-    max_sep=15.0,
-    n_neighbors=10,
-    accumulate_lsb=False,
-    lsb_h5_path=None,
-    lsb_h5_lock=None,
-    inference=False,
-    model_state_dict=None,
-    hparams=None,
+    process_queue: JoinableQueue,
+    database: Path,
+    band_dict: dict,
+    required_bands: list[str],
+    download_dir: Path,
+    db_lock: LockT,
+    all_downloads_complete: EventT,
+    shutdown_flag: EventT,
+    queue_lock: LockT,
+    processed_in_current_run: dict,
+    use_full_res: bool,
+    cut_size: int,
+    seg_mode: str,
+    max_sep: float,
+    n_neighbors: int,
+    accumulate_lsb: bool,
+    lsb_h5_path: Path,
+    lsb_h5_lock: LockT,
 ):
     """
     Worker that processes downloaded full resolution data.
@@ -1058,6 +541,7 @@ def process_worker(
         shutdown_flag: Flag to signal shutdown
         queue_lock: Lock for queue access
         processed_in_current_run: Dict tracking processed tiles per band
+        use_full_res: Whether to use full resolution data
         cut_size: Size of cutouts in pixels
         seg_mode: Segmentation mode
         max_sep: Maximum separation for matching
@@ -1065,20 +549,9 @@ def process_worker(
         accumulate_lsb: Accumulate all lsb cutouts to a single h5 file
         lsb_h5_path: Path to lsb h5 file
         lsb_h5_lock: Multiprocessing lock to avoid race conditions
-        model_state_dict: model state dictionary
-        hparams: model hyperparameters
     """
     worker_id = os.getpid()
     logger.debug(f'Processing worker {worker_id} started')
-
-    if inference:
-        model = ZooBot_lightning_v1(**hparams)  # type: ignore
-        model.load_state_dict(model_state_dict)  # type: ignore
-        model.freeze()
-        model.eval()
-        model = model.to(DEVICE)
-    else:
-        model = None
 
     while not (
         shutdown_flag.is_set() or (all_downloads_complete.is_set() and process_queue.empty())
@@ -1127,12 +600,10 @@ def process_worker(
                     seg_mode=seg_mode,
                     max_sep=max_sep,
                     n_neighbors=n_neighbors,
-                    use_full_res=True,
+                    use_full_res=use_full_res,
                     accumulate_lsb=accumulate_lsb,
                     lsb_file_path=lsb_h5_path,
                     file_lock=lsb_h5_lock,
-                    inference=inference,
-                    model=model,
                 )
                 logger.debug(
                     f'Finished processing tile {tile} in {time.time() - process_start:.2f}s.'
@@ -1190,85 +661,88 @@ def process_worker(
     logger.info(f'Process worker {worker_id} exiting')
 
 
-def main(
-    update,
-    band_dict,
-    download_dir,
-    at_least,
-    show_tile_stats,
-    build_kdtree,
-    tile_info_dir,
-    band_constr,
-    coordinates,
-    dataframe_path,
-    tiles,
-    ra_key,
-    ra_key_default,
-    dec_key,
-    dec_key_default,
-    id_key,
-    id_key_default,
-    bands_to_combine,
-    num_processes,
-    comb_cutouts,
-    aggr_cutouts,
-    aggr_dir,
-    dwarfs_only,
-    seg_mode,
-    dwarf_cat,
-    cut_objects,
-    cut_size,
-    max_sep,
-    n_neighbors,
-    database,
-    catalog_path,
-    process_all_avail,
-    use_full_res=False,
-    accumulate_lsb=False,
-    lsb_h5_path=None,
-    process_groups=False,
-    group_tiles=None,
-    inference=False,
-    model_path=None,
-):
+def main() -> None:
     try:
-        if inference:
-            model_state_dict, hparams = load_model(model_path)
-        else:
-            model_state_dict, hparams = None, None
+        cfg = load_settings('configs/combination_config.yaml')
+        # remove previous run's database and logs if resume = false
+        purge_previous_run(cfg)
+        setup_logger(
+            log_dir=cfg.paths.log_directory,
+            name=cfg.logging.name,
+            logging_level=getattr(logging, cfg.logging.level.upper(), logging.INFO),
+            force=True,
+        )
+        logger.info('Config and logging initialized.')
+
+        cfg_dict = settings_to_jsonable(cfg)
+
+        # Print settings in human readable format
+        cfg_yaml = yaml.safe_dump(cfg_dict, sort_keys=False)
+        logger.info(f'Resolved config (YAML):\n{cfg_yaml}')
+
+        # filter considered bands from the full band dictionary
+        band_dict = {
+            k: cfg.bands[k].model_dump(mode='python') for k in cfg.runtime.considered_bands
+        }
+        # make sure necessary directories exist
+        ensure_runtime_dirs(cfg=cfg)
+
+        # Define frequently used variables
+        database = cfg.paths.progress_db_path
+        tile_info_dir = cfg.paths.tile_info_directory
+        download_dir = cfg.paths.download_directory
+        dwarf_catalog = cfg.catalog.dwarf
+        use_full_res = cfg.runtime.use_full_resolution
+        num_cores = cfg.runtime.num_cores
+        prefetch_factor = cfg.runtime.prefetch_factor
+        process_all_avail = cfg.runtime.process_all_available
+        bands_to_combine = cfg.combination.bands_to_combine
+        cut_size = cfg.cutouts.size_px
+        dwarfs_only = cfg.runtime.process_only_known_dwarfs
+        accumulate_lsb = cfg.combination.accumulate_lsb_to_h5
+        lsb_h5_path = cfg.combination.lsb_cutout_path
+        seg_mode = cfg.cutouts.segmentation_mode
+        seg_mode = (
+            None if cfg.cutouts.segmentation_mode == 'none' else cfg.cutouts.segmentation_mode
+        )
+        max_sep = cfg.combination.max_match_sep_arcsec
+        n_neighbors = cfg.combination.negatives_per_positive
 
         # query availability of the tiles
         availability, all_tiles = query_availability(
-            update, band_dict, at_least, show_tile_stats, build_kdtree, tile_info_dir
+            cfg.tiles.update_tiles,
+            band_dict,
+            cfg.tiles.show_tile_statistics,
+            cfg.tiles.build_new_kdtree,
+            tile_info_dir,
         )
 
         # read the input catalog
         try:
-            input_catalog = pd.read_csv(catalog_path)
+            input_catalog = pd.read_csv(dwarf_catalog.path)
         except FileNotFoundError:
-            logger.error(f'File not found: {catalog_path}')
+            logger.error(f'File not found: {dwarf_catalog.path}')
             raise FileNotFoundError
 
         _, tiles_x_bands, _ = input_to_tile_list(
             availability,
-            band_constr,
-            coordinates,
-            dataframe_path,
-            tiles,
-            ra_key,
-            dec_key,
-            id_key,
+            cfg.tiles.band_constraint,
+            cfg.inputs,
             tile_info_dir,
-            ra_key_default,
-            dec_key_default,
-            id_key_default,
+            dwarf_catalog.columns.ra,
+            dwarf_catalog.columns.dec,
+            dwarf_catalog.columns.id,
         )
 
         if tiles_x_bands is not None:
+            tiles_set = set(tiles_x_bands)  # Convert list to set for faster lookup
             selected_all_tiles = [
-                [tile for tile in band_tiles if tile in tiles_x_bands] for band_tiles in all_tiles
+                [tile for tile in band_tiles if tile in tiles_set] for band_tiles in all_tiles
             ]
-            availability = TileAvailability(selected_all_tiles, band_dict, at_least_key)
+            availability = TileAvailability(selected_all_tiles, band_dict)
+
+        lsb_h5_lock = Lock()
+
         try:
             if use_full_res:
                 # Initialize the database for progress tracking
@@ -1276,17 +750,20 @@ def main(
                 # Initialize shutdown manager
                 killer = GracefulKiller()
                 # Initialize job queue and result queue
+                shutdown_flag = Event()
+                download_queue = JoinableQueue()
+                process_queue = JoinableQueue(maxsize=num_cores * prefetch_factor)
+                db_lock = Lock()
+                queue_lock = Lock()
                 manager = Manager()
-                shutdown_flag = manager.Event()
-                download_queue = manager.Queue()
-                process_queue = manager.Queue(maxsize=num_processes * PREFETCH_FACTOR)
-                db_lock = manager.Lock()
-                queue_lock = manager.Lock()
                 downloaded_bands = manager.dict()
 
                 if accumulate_lsb:
-                    lsb_h5_lock = manager.Lock()
-                    initialize_lsb_file(lsb_h5_path, bands_to_combine, cut_size)
+                    initialize_lsb_file(
+                        output_path=cfg.combination.lsb_cutout_path,
+                        band_names=bands_to_combine,
+                        size=cut_size,
+                    )
                 else:
                     lsb_h5_lock = None
 
@@ -1302,9 +779,11 @@ def main(
                     process_all_bands=process_all_avail,
                     only_known_dwarfs=dwarfs_only,
                     process_type='cutouts',
-                    process_groups=process_groups,
-                    group_tiles=group_tiles,
+                    process_groups=cfg.combination.process_groups_only,
+                    group_tiles=cfg.combination.group_tiles_csv,
                 )
+
+                print(unprocessed_jobs)
 
                 unprocessed_jobs_at_start = {band: 0 for band in band_dict.keys()}
 
@@ -1316,9 +795,9 @@ def main(
                 logger.info(f'Number of unprocessed jobs: {unprocessed_jobs_at_start}')
 
                 # Create an event to signal when all downloads are complete
-                all_downloads_complete = multiprocessing.Event()
+                all_downloads_complete = manager.Event()
                 # Set number of download threads
-                num_download_threads = min(PREFETCH_FACTOR * num_processes, len(unprocessed_jobs))
+                num_download_threads = min(num_cores * prefetch_factor, len(unprocessed_jobs))
                 logger.info(f'Using {num_download_threads} download threads.')
 
                 # Start download threads
@@ -1330,14 +809,15 @@ def main(
                             database,
                             download_queue,
                             process_queue,
-                            set(bands_to_combine),
-                            band_dictionary,
+                            bands_to_combine,
+                            band_dict,
                             download_dir,
                             db_lock,
                             shutdown_flag,
                             queue_lock,
                             processed_in_current_run,
                             downloaded_bands,
+                            use_full_res,
                         ),
                     )
                     t.daemon = True
@@ -1346,7 +826,7 @@ def main(
 
                 # Start processing workers
                 processes = []
-                for _ in range(num_processes):
+                for _ in range(num_cores):
                     p = multiprocessing.Process(
                         target=process_worker,
                         args=(
@@ -1360,6 +840,7 @@ def main(
                             shutdown_flag,
                             queue_lock,
                             processed_in_current_run,
+                            use_full_res,
                             cut_size,
                             seg_mode,
                             max_sep,
@@ -1367,9 +848,6 @@ def main(
                             accumulate_lsb,
                             lsb_h5_path,
                             lsb_h5_lock,
-                            inference,
-                            model_state_dict,
-                            hparams,
                         ),
                     )
                     p.start()
@@ -1413,7 +891,7 @@ def main(
                             all_downloads_complete.set()
 
                             # Add sentinel values to signal the end of processing
-                            for _ in range(num_processes):
+                            for _ in range(num_cores):
                                 process_queue.put((None, None))
 
                         # Check if all worker processes have exited
@@ -1426,48 +904,30 @@ def main(
             else:
                 if dwarfs_only:
                     tiles_to_process = get_dwarf_tile_list(
-                        dwarf_cat, in_dict=band_dict, bands=bands_to_combine
+                        dwarf_cat=cfg.catalog.dwarf.path, in_dict=band_dict, bands=bands_to_combine
                     )
                 else:
                     tiles_to_process = availability.get_tiles_for_bands(bands_to_combine)
 
-                # tiles_to_process = [
-                #     (np.int64(216), np.int64(306)),
-                #     (np.int64(220), np.int64(253)),
-                #     (np.int64(225), np.int64(270)),
-                #     (np.int64(232), np.int64(250)),
-                #     (np.int64(250), np.int64(269)),
-                #     (np.int64(314), np.int64(248)),
-                #     (np.int64(317), np.int64(280)),
-                #     (np.int64(323), np.int64(244)),
-                #     (np.int64(328), np.int64(244)),
-                #     (np.int64(375), np.int64(267)),
-                #     (np.int64(389), np.int64(269)),
-                #     (np.int64(391), np.int64(256)),
-                #     (np.int64(428), np.int64(249)),
-                #     (np.int64(439), np.int64(243)),
-                #     (np.int64(337), np.int64(243)),
-                # ]
-
-                if comb_cutouts:
+                if cfg.combination.combine_cutouts:
                     fuse_cutouts_parallel(
-                        download_dir,
-                        tiles_to_process,
-                        band_dict,
+                        parent_dir=download_dir,
+                        tiles=tiles_to_process,
+                        in_dict=band_dict,
                         band_names=bands_to_combine,
-                        num_processes=num_processes,
-                        cut_objects=cut_objects,
+                        num_processes=num_cores,
                         cut_size=cut_size,
                         seg_mode=seg_mode,
                         max_sep=max_sep,
                         n_neighbors=n_neighbors,
+                        use_full_res=use_full_res,
+                        accumulate_lsb=accumulate_lsb,
+                        lsb_file_path=lsb_h5_path,
+                        file_lock=lsb_h5_lock,
                     )
 
         except Exception as e:
             logger.error(f'There was an error getting the tile numbers: {e}.')
-
-        if aggr_cutouts:
-            combine_h5_files(download_dir, aggr_dir, objects_per_file=1000)
 
     except Exception as e:
         logger.error(f'An error occurred in the main process: {str(e)}')
@@ -1496,90 +956,8 @@ def main(
 
 if __name__ == '__main__':
     multiprocessing.set_start_method('spawn')
-    print('Starting script...')
-    # parse command line arguments
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--coordinates',
-        nargs='+',
-        type=float,
-        action='append',
-        metavar=('ra', 'dec'),
-        help='list of pairs of coordinates to make cutouts from',
-    )
-    parser.add_argument('--dataframe', type=str, help='path to a CSV file containing the DataFrame')
-    parser.add_argument('--ra_key', type=str, help='right ascension key in the DataFrame')
-    parser.add_argument('--dec_key', type=str, help='declination key in the DataFrame')
-    parser.add_argument('--id_key', type=str, help='id key in the DataFrame')
-    parser.add_argument(
-        '--tiles',
-        type=int,
-        nargs='+',
-        action='append',
-        metavar=('tile'),
-        help='list of tiles to make cutouts from',
-    )
-    parser.add_argument(
-        '--processing_cores',
-        type=int,
-        default=15,
-        help='Number of cores to use for processing (default: 15)',
-    )
-    parser.add_argument(
-        '--database',
-        type=str,
-        default='progress.db',
-        help='Database file to keep track of progress (default: cutout_gen.db)',
-    )
-
-    args = parser.parse_args()
-
-    # define the arguments for the main function
-
-    arg_dict_main = {
-        'update': update_tiles,
-        'band_dict': band_dict_incl,
-        'at_least': at_least_key,
-        'show_tile_stats': show_tile_statistics,
-        'build_kdtree': build_new_kdtree,
-        'tile_info_dir': tile_info_directory,
-        'coordinates': args.coordinates,
-        'dataframe_path': args.dataframe,
-        'tiles': args.tiles,
-        'ra_key': args.ra_key,
-        'ra_key_default': ra_key_script,
-        'dec_key': args.dec_key,
-        'dec_key_default': dec_key_script,
-        'id_key': args.id_key,
-        'id_key_default': id_key_script,
-        'band_constr': band_constraint,
-        'download_dir': download_directory,
-        'bands_to_combine': fuse_bands,
-        'num_processes': args.processing_cores,
-        'comb_cutouts': combine_cutouts,
-        'aggr_cutouts': aggregate_cutouts,
-        'aggr_dir': aggregate_h5_directory,
-        'dwarfs_only': process_only_known_dwarfs,
-        'seg_mode': segmentation_mode,
-        'dwarf_cat': dwarf_catalog,
-        'cut_objects': cutout_objects,
-        'cut_size': cutout_size,
-        'max_sep': maximum_match_separation,
-        'n_neighbors': negatives_per_positive,
-        'database': os.path.join(database_directory, args.database),
-        'catalog_path': dwarf_catalog,
-        'process_all_avail': process_all_available,
-        'use_full_res': use_full_resolution,
-        'accumulate_lsb': accumulate_lsb_to_h5,
-        'lsb_h5_path': accumulated_lsb_path,
-        'process_groups': process_groups_only,
-        'group_tiles': tiles_in_groups,
-        'inference': run_inference,
-        'model_path': path_to_model,
-    }
-
     start = time.time()
-    main(**arg_dict_main)
+    main()
     end = time.time()
     elapsed = end - start
     elapsed_string = str(timedelta(seconds=elapsed))

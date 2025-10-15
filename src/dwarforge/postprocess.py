@@ -295,20 +295,30 @@ def add_labels(
     return det_df_updated, matching_stats
 
 
-def cutout2d_segmented(data, tile_str, segmap, object_id, x, y, size, cutout_in, seg_mode):
+def cutout2d_segmented(
+    data: np.ndarray,
+    tile_str: str,
+    segmap: np.ndarray,
+    object_id: int,
+    x: int,
+    y: int,
+    size: int,
+    cutout_in: np.ndarray,
+    seg_mode: str | None,
+):
     """
     Create 2d cutout from an image, applying a segmentation mask for a specific object.
 
     Args:
-        data (numpy.ndarray): image data
-        tile_str (str): tile numbers
-        segmap (numpy.ndarray): segmentation map with object IDs
-        object_id (int): ID of the object to isolate in the cutout
-        x (int): x-coordinate of cutout center
-        y (int): y-coordinate of cutout center
-        size (int): square cutout size
-        cutout_in (numpy.ndarray): empty input cutout
-        seg_mode (str): how to treat the segmentation map? multiply / concatenate
+        data: image data
+        tile_str: tile numbers
+        segmap: segmentation map with object IDs
+        object_id: ID of the object to isolate in the cutout
+        x: x-coordinate of cutout center
+        y: y-coordinate of cutout center
+        size: square cutout size
+        cutout_in: empty input cutout
+        seg_mode: how to treat the segmentation map? multiply / concatenate
 
     Returns:
         numpy.ndarray: 2d cutout (size x size pixels) with only the specified object
@@ -381,7 +391,7 @@ def make_cutouts(
     dec: np.ndarray | None = None,
     segmap: np.ndarray | None = None,
     cutout_size: int = 64,
-    seg_mode: str = 'multiply',
+    seg_mode: str | None = 'multiply',
 ):
     """
     Makes cutouts from the objects passed in the dataframe, data is multiplied
@@ -1330,7 +1340,7 @@ def read_band_data(
     tile: tuple[int, int],
     band: str,
     in_dict: dict,
-    seg_mode: str,
+    seg_mode: str | None,
     use_full_res: bool = False,
 ) -> tuple[
     np.ndarray,

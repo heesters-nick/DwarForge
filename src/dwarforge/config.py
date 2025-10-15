@@ -48,6 +48,32 @@ class Runtime(BaseModel):
     process_only_known_dwarfs: bool
 
 
+class CombinationCfg(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    bands_to_combine: List[str]
+    max_match_sep_arcsec: float
+    negatives_per_positive: int
+    accumulate_lsb_to_h5: bool
+    aggregate_cutouts: bool
+    aggregate_objects_per_file: int
+    combine_cutouts: bool
+    process_groups_only: bool
+    group_tiles_csv: str
+    lsb_cutout_path: Path
+
+
+class H5AggregationCfg(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    objects_per_file: int
+    label_filters: list[str | int] | None
+    in_file_suffix: str
+    out_file_prefix: str
+    number_of_tiles: int | None
+    preprocess_cutouts: bool
+    preprocessing_mode: Literal['vis', 'training']
+    tile_df_file: Path
+
+
 class Tiles(BaseModel):
     model_config = ConfigDict(extra='forbid')
     update_tiles: bool
@@ -128,6 +154,7 @@ class PathsCommon(BaseModel):
     figure_dirname: str
     logs_dirname: str
     database_dirname: str
+    aggregate_dirname: str
 
 
 class Band(BaseModel):
@@ -148,6 +175,7 @@ class RawConfig(BaseModel):
     logging: LoggingCfg
     monitoring: Monitoring
     runtime: Runtime
+    combination: CombinationCfg
     tiles: Tiles
     detection: Detection
     cutouts: Cutouts
@@ -156,6 +184,7 @@ class RawConfig(BaseModel):
     paths_by_machine: Dict[str, PathsByMachineEntry]
     bands: Dict[str, Band]
     catalog: CatalogCfg
+    h5_aggregation: H5AggregationCfg
 
 
 class PathsResolved(BaseModel):
@@ -171,6 +200,7 @@ class PathsResolved(BaseModel):
     database_directory: Path
     progress_db_path: Path
     redshift_class_catalog: Path
+    aggregate_directory: Path
 
 
 class Settings(BaseModel):
@@ -179,6 +209,7 @@ class Settings(BaseModel):
     logging: LoggingCfg
     monitoring: Monitoring
     runtime: Runtime
+    combination: CombinationCfg
     tiles: Tiles
     detection: Detection
     cutouts: Cutouts
@@ -186,6 +217,7 @@ class Settings(BaseModel):
     bands: Dict[str, Band]
     paths: PathsResolved
     catalog: CatalogCfg
+    h5_aggregation: H5AggregationCfg
 
     @model_validator(mode='after')
     def _validate(self) -> 'Settings':
@@ -194,10 +226,33 @@ class Settings(BaseModel):
         for b in self.runtime.considered_bands:
             if b not in self.bands:
                 raise ValueError(f'Unknown band in considered_bands: {b}')
+        missing = set(self.combination.bands_to_combine) - set(self.runtime.considered_bands)
+        if missing:
+            raise ValueError(
+                f'combination.bands_to_combine not in runtime.considered_bands: {sorted(missing)}'
+            )
+        if self.combination.lsb_cutout_path.suffix.lower() != '.h5':
+            raise ValueError('combination.lsb_cutout_path must end with .h5')
+        if self.combination.max_match_sep_arcsec <= 0:
+            raise ValueError('combination.max_match_sep_arcsec must be > 0')
+        if not self.combination.lsb_cutout_path.is_absolute():
+            self.combination.lsb_cutout_path = (
+                self.paths.aggregate_directory / self.combination.lsb_cutout_path
+            )
+        if not self.h5_aggregation.tile_df_file.is_absolute():
+            self.h5_aggregation.tile_df_file = (
+                self.paths.table_directory / self.h5_aggregation.tile_df_file
+            )
         if self.cutouts.segmentation_mode not in {'concatenate', 'mask', 'none'}:
             raise ValueError('cutouts.segmentation_mode must be one of: concatenate | mask | none')
         if self.runtime.num_cores <= 1:
             self.runtime.num_cores = 1
+        if self.combination.group_tiles_csv and not Path(self.combination.group_tiles_csv).exists():
+            raise ValueError(
+                f'combination.group_tiles_csv not found: {self.combination.group_tiles_csv}'
+            )
+        if self.h5_aggregation.preprocessing_mode not in {'vis', 'training'}:
+            raise ValueError("h5_aggregation.preprocessing_mode must be 'vis' or 'training'")
         return self
 
 
@@ -222,6 +277,7 @@ def load_settings(
     logs = root / pc.logs_dirname
     dbdir = root / pc.database_dirname
     progress_db = dbdir / raw.monitoring.progress.database_name
+    aggregate = root / pc.aggregate_dirname
 
     paths = PathsResolved(
         root_dir_main=root,
@@ -235,6 +291,7 @@ def load_settings(
         database_directory=dbdir,
         progress_db_path=progress_db,
         redshift_class_catalog=pm.redshift_class_catalog,
+        aggregate_directory=aggregate,
     )
 
     cat = CatalogCfg(
@@ -259,6 +316,7 @@ def load_settings(
         logging=raw.logging,
         monitoring=raw.monitoring,
         runtime=raw.runtime,
+        combination=raw.combination,
         tiles=raw.tiles,
         detection=detection,
         cutouts=raw.cutouts,
@@ -266,6 +324,7 @@ def load_settings(
         bands=raw.bands,
         paths=paths,
         catalog=cat,
+        h5_aggregation=raw.h5_aggregation,
     )
 
 
@@ -274,7 +333,7 @@ def settings_to_jsonable(cfg: Settings) -> Dict[str, Any]:
     return cast(Dict[str, Any], cfg.model_dump(mode='json'))
 
 
-def ensure_runtime_dirs(cfg):
+def ensure_runtime_dirs(cfg: Settings) -> None:
     """
     Ensure that all runtime directories exist.
     """
@@ -285,5 +344,6 @@ def ensure_runtime_dirs(cfg):
         cfg.paths.log_directory,
         cfg.paths.database_directory,
         cfg.paths.cutout_directory,
+        cfg.paths.aggregate_directory,
     ):
         p.mkdir(parents=True, exist_ok=True)

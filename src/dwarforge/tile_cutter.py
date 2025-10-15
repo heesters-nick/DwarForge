@@ -12,8 +12,8 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.nddata import Cutout2D
 from astropy.wcs.utils import skycoord_to_pixel
-from dwarforge.kd_tree import TileWCS, query_tree, relate_coord_tile
-from dwarforge.utils import TileAvailability, tile_str
+from dwarforge.kd_tree import TileWCS, query_tree
+from dwarforge.utils import TileAvailability, relate_coord_tile, tile_str
 
 logger = logging.getLogger(__name__)
 

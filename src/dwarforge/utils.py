@@ -28,8 +28,6 @@ from scipy.stats import truncnorm
 from sklearn.decomposition import PCA
 from vos import Client
 
-client = Client()
-
 logger = logging.getLogger(__name__)
 
 
@@ -78,7 +76,7 @@ def query_gaia_stars(target_coord, r_arcsec, max_retries=3, retry_delay=5):
         table (dataframe): non-galaxy Gaia sources within the search radius.
     """
     Gaia.MAIN_GAIA_TABLE = 'gaiadr3.gaia_source'  # type: ignore # Select Data Release 3
-    Gaia.ROW_LIMIT = -1  # unlimited rows
+    Gaia.ROW_LIMIT = -1  # unlimited rows  # type: ignore
     columns = ['source_id', 'ra', 'dec', 'phot_g_mean_mag', 'in_galaxy_candidates']
 
     for attempt in range(max_retries):
@@ -390,7 +388,7 @@ class TileAvailability:
         ]
         return [tuple(tile) for tile in tile_array]
 
-    def get_tiles_for_bands(self, bands=None):
+    def get_tiles_for_bands(self, bands=None) -> list[tuple[int, int]]:
         """
         Get all tiles that are available in specified bands.
         If no bands are specified, return all unique tiles.
@@ -515,7 +513,7 @@ def check_objects_in_neighboring_tiles(tile, dwarfs_df, header):
     return dwarfs_in_current_tile
 
 
-def get_dwarf_tile_list(dwarf_cat, in_dict, bands):
+def get_dwarf_tile_list(dwarf_cat: Path, in_dict: dict, bands: list[str]) -> list[tuple[int, int]]:
     try:
         bands = [in_dict[band]['band'] for band in bands]
         dwarf_cat_filtered = get_df_for_bands(dwarf_cat, bands)
@@ -526,7 +524,7 @@ def get_dwarf_tile_list(dwarf_cat, in_dict, bands):
         str_to_tuple = [ast.literal_eval(item) for item in dwarf_tiles_for_bands]
     except Exception as e:
         print(f'Error in str_to_tuple: {e}')
-    unique_tiles = set(str_to_tuple)
+    unique_tiles = list(set(str_to_tuple))
     return unique_tiles
 
 
@@ -545,11 +543,8 @@ def check_bands(bands_str, to_check):
     return False  # Return False for NaN values
 
 
-def get_df_for_bands(dwarf_cat, check_for_bands):
-    if isinstance(dwarf_cat, str):
-        dwarf_cat_df = pd.read_csv(dwarf_cat)
-    else:
-        dwarf_cat_df = dwarf_cat
+def get_df_for_bands(dwarf_cat: Path, check_for_bands: list[str]) -> pd.DataFrame:
+    dwarf_cat_df = pd.read_csv(dwarf_cat)
     df_select = dwarf_cat_df.loc[
         (~dwarf_cat_df['tile'].isna())
         & (dwarf_cat_df['bands'].apply(lambda x: check_bands(x, check_for_bands)))
