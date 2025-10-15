@@ -705,7 +705,6 @@ def main() -> None:
 
 if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
-
     start = time.time()
     main()
     end = time.time()
