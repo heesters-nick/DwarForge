@@ -193,7 +193,7 @@ def combine_h5_files():
                         combined_data['label'].extend(np.array(f['label'])[remaining_mask])
                         combined_data['zspec'].extend(np.array(f['zspec'])[remaining_mask])
 
-                        object_counter += n_objects - objects_to_take
+                        object_counter += n_objects - objects_to_take  # type: ignore
 
         except Exception as e:
             logger.error(f'Error processing {input_file}: {e}')

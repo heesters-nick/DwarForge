@@ -252,9 +252,8 @@ class DriveUploader:
         return results
 
 
-# Example usage
 if __name__ == '__main__':
-    folder_id = '1Zy-KmrUP25HkBujNJCy_6QZR3EdJjrng'
+    folder_id = '1Zy-KmrUP25HkBujNJCy_6QZR3EdJjrng'  # Set the folder ID of the destination folder on Google Drive
     base_dir = '/arc/projects/unions/ssl/data/raw/tiles'
     project_dir = '/arc/home/heestersnick/dwarforge'
     source_directory = os.path.join(project_dir, 'desi')
@@ -268,7 +267,7 @@ if __name__ == '__main__':
             source_path=source_directory,
             folder_id=folder_id,
             max_workers=5,
-            file_pattern='*prep_v1.h5',
+            file_pattern='*prep_v1.h5',  # Set suffix of files that should be uploaded
         )
     except Exception as e:
         logger.error(f'An error occurred: {str(e)}')
