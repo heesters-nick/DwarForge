@@ -19,7 +19,7 @@ monitoring:
 runtime:
   # Processing & scheduling
   num_cores: 4         # number of physical cores to use
-  prefetch_factor: 2    # number of prefetched tiles per core
+  prefetch_factor: 3    # number of prefetched tiles per core
 
   # Bands & run mode
   anchor_band: "cfis_lsb-r"

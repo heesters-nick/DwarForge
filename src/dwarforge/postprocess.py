@@ -44,12 +44,12 @@ def match_stars(
         det_matches (dataframe): detections that are known objects
         extended_flag_idx (list): indices of all detections within extended_flag_radius of known stars
     """
-    c_det = SkyCoord(df_det['ra'], df_det['dec'], unit=u.deg)
-    c_label = SkyCoord(df_label['ra'], df_label['dec'], unit=u.deg)
+    c_det = SkyCoord(df_det['ra'], df_det['dec'], unit='deg')
+    c_label = SkyCoord(df_label['ra'], df_label['dec'], unit='deg')
 
     # Find closest matches within max_sep
     idx, d2d, _ = c_label.match_to_catalog_3d(c_det)
-    sep_constraint = d2d < max_sep * u.arcsec
+    sep_constraint = d2d < max_sep * u.arcsec  # type: ignore
     det_matching_idx = idx[sep_constraint]
 
     label_matches = df_label[sep_constraint].reset_index(drop=True)
@@ -529,10 +529,10 @@ def match_coordinates(band1, band2, band_data, max_sep=15.0):
     if not band_data[band1]['ra'].size or not band_data[band2]['ra'].size:
         return np.array([], dtype=int), np.array([], dtype=int)
 
-    reference_coords = SkyCoord(band_data[band1]['ra'], band_data[band1]['dec'], unit=u.deg)
-    target_coords = SkyCoord(band_data[band2]['ra'], band_data[band2]['dec'], unit=u.deg)
+    reference_coords = SkyCoord(band_data[band1]['ra'], band_data[band1]['dec'], unit='deg')
+    target_coords = SkyCoord(band_data[band2]['ra'], band_data[band2]['dec'], unit='deg')
     idx, d2d, _ = reference_coords.match_to_catalog_3d(target_coords)
-    mask = d2d < max_sep * u.arcsec
+    mask = d2d < max_sep * u.arcsec  # type: ignore
     return np.where(mask)[0], idx[mask]
 
 
@@ -1010,7 +1010,7 @@ def match_coordinates_across_bands(
     initial_groups = defaultdict(set)
     if len(valid_bands) >= 2:
         combined_coords = concatenate(all_coords_list)
-        idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)
+        idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)  # type: ignore
         mask = (idx1 < idx2) & (
             np.array([bands_map[i] != bands_map[j] for i, j in zip(idx1, idx2)])
         )
@@ -1140,7 +1140,7 @@ def match_coordinates_across_bands(
                     if len(member_indices) == 1:
                         current_refined_indices.add(member_indices[0])
                     else:
-                        min_sep = np.inf * u.deg
+                        min_sep = np.inf * u.deg  # type: ignore
                         closest_idx = -1
                         for idx in member_indices:
                             try:

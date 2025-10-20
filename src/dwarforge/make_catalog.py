@@ -3,7 +3,6 @@ import os
 from functools import partial
 from multiprocessing import Pool
 
-import astropy.units as u
 import numpy as np
 import pandas as pd
 from astropy.coordinates import SkyCoord
@@ -18,8 +17,8 @@ def match_coordinates(detected_ra, detected_dec, train_ra, train_dec, max_separa
     if len(train_ra) == 0:
         return np.zeros(len(detected_ra), dtype=bool), np.array([])
 
-    detected_coords = SkyCoord(ra=detected_ra * u.degree, dec=detected_dec * u.degree)
-    train_coords = SkyCoord(ra=train_ra * u.degree, dec=train_dec * u.degree)
+    detected_coords = SkyCoord(ra=detected_ra, dec=detected_dec, unit='deg')
+    train_coords = SkyCoord(ra=train_ra, dec=train_dec, unit='deg')
 
     idx, sep, _ = detected_coords.match_to_catalog_sky(train_coords)
     matches = sep.arcsec <= max_separation

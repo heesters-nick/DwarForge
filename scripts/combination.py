@@ -639,7 +639,7 @@ def process_worker(
                 for band, paths in paths_dict.items():
                     try:
                         if os.path.exists(paths['final_path']):
-                            os.remove(paths['final_path'])
+                            # os.remove(paths['final_path'])
                             logger.debug(f'Cleaned up file for tile {tile} band {band}')
                     except Exception as cleanup_error:
                         logger.error(

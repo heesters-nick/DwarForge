@@ -83,7 +83,9 @@ def query_gaia_stars(target_coord, r_arcsec, max_retries=3, retry_delay=5):
         try:
             # Query Gaia DR3 for sources within the defined search radius
             job = Gaia.cone_search_async(
-                target_coord, radius=u.Quantity(r_arcsec, u.arcsec), columns=columns
+                target_coord,
+                radius=u.Quantity(r_arcsec, u.arcsec),  # type: ignore
+                columns=columns,
             )
             table = job.get_results()
 
