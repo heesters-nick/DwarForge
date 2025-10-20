@@ -783,8 +783,6 @@ def main() -> None:
                     group_tiles=cfg.combination.group_tiles_csv,
                 )
 
-                print(unprocessed_jobs)
-
                 unprocessed_jobs_at_start = {band: 0 for band in band_dict.keys()}
 
                 for job in unprocessed_jobs:

@@ -3,7 +3,7 @@
 machine: local   # canfar | narval | local
 
 logging:
-  name: dwarforge_test_local
+  name: dwarforge_i_dr4
   level: INFO
 
 monitoring:
@@ -12,9 +12,9 @@ monitoring:
     interval_s: 20  # check memory usage every N seconds
     aggregation_s: 360  # aggregate over this many seconds
   progress:
-    database_name: "progress_test.db"   # choose a new name per run if you want a fresh DB
+    database_name: "progress_i_dr4.db"   # choose a new name per run if you want a fresh DB
     # **** CAREFUL **** 
-    resume: true  # if false existing database and logs with the specified names will be overwritten
+    resume: false  # if false existing database and logs with the specified names will be overwritten
 
 runtime:
   # Processing & scheduling
@@ -23,7 +23,7 @@ runtime:
 
   # Bands & run mode
   anchor_band: "ps-i"
-  considered_bands: ["cfis-u", "whigs-g", "cfis_lsb-r", "ps-i", "wishes-z"]
+  considered_bands: ["whigs-g", "cfis_lsb-r", "ps-i"]
   use_full_resolution: false  # if true, download full resolution even if rebinned version exists
   process_all_available: false  # process all bands, else only tiles available in anchor_band
   process_only_known_dwarfs: false
@@ -165,9 +165,9 @@ bands:
     zp: 30.0
 
   ps-i:
-    name: "PS-DR3"
+    name: "PSS.DR4"
     band: "i"
-    vos: "vos:cfis/panstarrs/DR3/tiles"
+    vos: "vos:cfis/panstarrs/DR4/resamp"
     suffix: ".i.fits"
     delimiter: "."
     fits_ext: 0

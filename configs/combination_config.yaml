@@ -3,7 +3,7 @@
 machine: local   # canfar | narval | local
 
 logging:
-  name: dwarforge_combine
+  name: dwarforge_combine_psi-dr4
   level: INFO
 
 monitoring:
@@ -12,7 +12,7 @@ monitoring:
     interval_s: 20  # check memory usage every N seconds
     aggregation_s: 360  # aggregate over this many seconds
   progress:
-    database_name: "progress_combine.db"   # choose a new name per run if you want a fresh DB
+    database_name: "progress_combine_psi-dr4.db"   # choose a new name per run if you want a fresh DB
     # **** CAREFUL **** 
     resume: false  # if false existing database and logs with the specified names will be overwritten
 
@@ -52,7 +52,7 @@ h5_aggregation:
 
 tiles:
   update_tiles: false
-  build_new_kdtree: false   # if true, build kd-tree after (re)checking tiles
+  build_new_kdtree: false  # if true, build kd-tree after (re)checking tiles
   show_tile_statistics: true
   band_constraint: 1        # min bands for a tile to qualify
 
@@ -165,9 +165,9 @@ bands:
     zp: 30.0
 
   ps-i:
-    name: "PS-DR3"
+    name: "PSS.DR4"
     band: "i"
-    vos: "vos:cfis/panstarrs/DR3/tiles"
+    vos: "vos:cfis/panstarrs/DR4/resamp"
     suffix: ".i.fits"
     delimiter: "."
     fits_ext: 0

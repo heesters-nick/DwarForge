@@ -508,3 +508,97 @@ def detect_anomaly(
         new_hdu.writeto(out_path, overwrite=True)
 
     return image, out_path
+
+
+def detect_anomaly_simple(
+    image: np.ndarray,
+    zero_threshold: float = 0.005,
+    min_size: int = 50,
+    replace_anomaly: bool = True,
+    dilate_mask: bool = True,
+    dilation_iters: int = 1,
+) -> np.ndarray:
+    """
+    Detect and replace anomalies in an image using wavelet decomposition.
+
+    This function analyzes an astronomical image to identify anomalous regions
+    by performing wavelet decomposition and identifying regions with minimal
+    fluctuations below a threshold. It can optionally replace detected anomalous
+    pixels with zeros.
+
+    Args:
+        image: Input astronomical image to process
+        zero_threshold: Fluctuation threshold below which an anomaly is detected
+        min_size: Minimum connected pixel count to be considered an anomaly
+        replace_anomaly: Whether to set anomalous pixels to zero
+        dilate_mask: Whether to expand the detected anomaly mask
+        dilation_iters: Number of dilation iterations if dilate_mask is True
+
+    Returns:
+        Processed image with anomalies optionally replaced
+
+    Notes:
+        This function uses Haar wavelet decomposition to identify regions with
+        suspiciously low variation, which often indicate detector artifacts or
+        other non-astronomical features in the image.
+    """
+    # replace nan values with zeros
+    image[np.isnan(image)] = 0.0
+
+    # Perform a 2D Discrete Wavelet Transform using Haar wavelets
+    coeffs = pywt.dwt2(image, 'haar')
+    cA, (cH, cV, cD) = coeffs  # Decomposition into approximation and details
+
+    # Create binary masks where wavelet coefficients are below the threshold
+    mask_horizontal = np.abs(cH) <= zero_threshold
+    mask_vertical = np.abs(cV) <= zero_threshold
+    mask_diagonal = np.abs(cD) <= zero_threshold
+
+    masks = [mask_diagonal, mask_horizontal, mask_vertical]
+
+    # Create a global mask to accumulate all anomalies
+    global_mask = np.zeros_like(image, dtype=bool)
+    # Create masks for each component
+    component_masks = np.zeros((3, cA.shape[0], cA.shape[1]), dtype=bool)
+    anomalies = np.zeros(3, dtype=bool)
+    for i, mask in enumerate(masks):
+        # Apply connected-component labeling to find connected regions in the mask
+        labeled_array, num_features = label(mask)  # type: ignore
+
+        # Calculate the sizes of all components
+        component_sizes = np.bincount(labeled_array.ravel())
+
+        # Check if any component is larger than the minimum size
+        anomaly_detected = np.any(component_sizes[1:] >= min_size)
+        anomalies[i] = anomaly_detected
+
+        if not anomaly_detected:
+            continue
+
+        # Prepare to accumulate a total mask
+        total_feature_mask = np.zeros_like(image, dtype=bool)
+
+        # Loop through all labels to find significant components
+        for component_label in range(1, num_features + 1):  # Start from 1 to skip background
+            if component_sizes[component_label] >= min_size:
+                # Create a binary mask for this component
+                component_mask = labeled_array == component_label
+                # add component mask to component masks
+                component_masks[i] |= component_mask
+                # Upscale the mask to match the original image dimensions
+                upscaled_mask = np.kron(component_mask, np.ones((2, 2), dtype=bool))
+                # Accumulate the upscaled feature mask
+                total_feature_mask |= upscaled_mask
+
+        # Accumulate global mask
+        global_mask |= total_feature_mask
+        # Dilate the masks to catch some odd pixels on the outskirts of the anomaly
+        if dilate_mask:
+            global_mask = binary_dilation(global_mask, iterations=dilation_iters)
+            for j, comp_mask in enumerate(component_masks):
+                component_masks[j] = binary_dilation(comp_mask, iterations=dilation_iters)
+    # Replace the anomaly with zeros
+    if replace_anomaly:
+        image[global_mask] = 0.0
+
+    return image

@@ -646,6 +646,8 @@ def open_fits(file_path: Path, fits_ext: int) -> tuple[np.ndarray, Header]:
     logger.debug(f'Opening fits file {os.path.basename(file_path)}..')
     start_opening = time.time()
     with fits.open(file_path, memmap=True) as hdul:  # type: ignore
+        if fits_ext > len(hdul) - 1:
+            fits_ext = 0
         data = hdul[fits_ext].data.astype(np.float32)  # type: ignore
         header = hdul[fits_ext].header  # type: ignore
     logger.debug(

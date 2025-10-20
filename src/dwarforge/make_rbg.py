@@ -2,6 +2,7 @@ import logging
 import warnings
 
 import numpy as np
+from dwarforge.detection_utils import detect_anomaly_simple
 from scipy.interpolate import griddata
 from scipy.ndimage import binary_dilation, binary_fill_holes, label
 
@@ -347,3 +348,149 @@ def preprocess_cutout(
     warnings.showwarning = warnings.showwarning_default  # type: ignore
 
     return img_linear
+
+
+def prep_cutout(
+    cutout: np.ndarray,
+) -> np.ndarray:
+    """Create an RGB image from the cutout data and save or plot it.
+
+    Args:
+        cutout: cutout data with shape (channels, height, width)
+
+    Returns:
+        preprocessed image cutout
+
+    """
+    # map out bands to RGB
+    cutout_red = cutout[2]  # i-band
+    cutout_green = cutout[1]  # r-band
+    cutout_blue = cutout[0]  # g-band
+
+    # adjust zero-point for the g-band
+    if np.count_nonzero(cutout_blue) > 0:
+        cutout_blue = adjust_flux_with_zp(cutout_blue, 27.0, 30.0)
+
+    # replace anomalies
+    cutout_red = detect_anomaly_simple(cutout_red)
+    cutout_green = detect_anomaly_simple(cutout_green)
+    cutout_blue = detect_anomaly_simple(cutout_blue)
+
+    # synthesize missing channel from the existing ones
+    # longest valid wavelength is mapped to red, middle to green, shortest to blue
+    if np.count_nonzero(cutout_red > 1e-10) == 0:
+        cutout_red = cutout_green
+        cutout_green = (cutout_green + cutout_blue) / 2
+    elif np.count_nonzero(cutout_green > 1e-10) == 0:
+        cutout_green = (cutout_red + cutout_blue) / 2
+    elif np.count_nonzero(cutout_blue > 1e-10) == 0:
+        cutout_blue = cutout_green
+        cutout_green = (cutout_red + cutout_blue) / 2
+
+    # stack the channels in the order red, green, blue
+    cutout_prep = np.stack([cutout_red, cutout_green, cutout_blue], axis=-1)
+
+    return cutout_prep
+
+
+def generate_rgb(
+    cutout: np.ndarray,
+    stretch: float = 125,
+    Q: float = 7.0,
+    gamma: float = 0.25,
+) -> np.ndarray:
+    """Create an RGB image from three bands of data preserving relative intensities.
+
+    Processes multi-band astronomical data into a properly scaled RGB image
+    suitable for visualization, handling high dynamic range and empty channels.
+
+    Args:
+        cutout: 3D array of shape (height, width, 3) with band data
+        stretch: Scaling factor controlling overall brightness
+        Q: Softening parameter for asinh scaling (higher = more linear)
+        gamma: Gamma correction factor (lower = enhances faint features)
+
+    Returns:
+        Normalized RGB image with values in range [0, 1]
+
+    Notes:
+        For astronomical data with high dynamic range, "asinh" scaling is
+        typically preferred as it preserves both bright and faint details.
+    """
+    frac = 0.1
+    with np.errstate(divide='ignore', invalid='ignore'):
+        red = cutout[:, :, 0]
+        green = cutout[:, :, 1]
+        blue = cutout[:, :, 2]
+
+        # Check for zero channels
+        red_is_zero = np.all(red == 0)
+        green_is_zero = np.all(green == 0)
+        blue_is_zero = np.all(blue == 0)
+
+        # Compute average intensity before scaling choice (avoiding zero channels)
+        nonzero_channels = []
+        if not red_is_zero:
+            nonzero_channels.append(red)
+        if not green_is_zero:
+            nonzero_channels.append(green)
+        if not blue_is_zero:
+            nonzero_channels.append(blue)
+
+        if nonzero_channels:
+            i_mean = sum(nonzero_channels) / len(nonzero_channels)
+        else:
+            i_mean = np.zeros_like(red)  # All channels are zero
+
+        # Apply asinh scaling
+        if not red_is_zero:
+            red = red * np.arcsinh(Q * i_mean / stretch) * frac / (np.arcsinh(frac * Q) * i_mean)
+        if not green_is_zero:
+            green = (
+                green * np.arcsinh(Q * i_mean / stretch) * frac / (np.arcsinh(frac * Q) * i_mean)
+            )
+        if not blue_is_zero:
+            blue = blue * np.arcsinh(Q * i_mean / stretch) * frac / (np.arcsinh(frac * Q) * i_mean)
+
+        # Apply gamma correction while preserving sign
+        if gamma is not None:
+            if not red_is_zero:
+                red_mask = abs(red) <= 1e-9
+                red = np.sign(red) * (abs(red) ** gamma)
+                red[red_mask] = 0
+
+            if not green_is_zero:
+                green_mask = abs(green) <= 1e-9
+                green = np.sign(green) * (abs(green) ** gamma)
+                green[green_mask] = 0
+
+            if not blue_is_zero:
+                blue_mask = abs(blue) <= 1e-9
+                blue = np.sign(blue) * (abs(blue) ** gamma)
+                blue[blue_mask] = 0
+        # Stack the channels after scaling and gamma correction
+        result = np.stack([red, green, blue], axis=-1).astype(np.float32)
+        # Clip the result to [0, 1] for display
+        result = np.clip(result, 0, 1)
+    return result
+
+
+def cutouts_to_rgb(cutouts: np.ndarray) -> np.ndarray:
+    """
+    Vectorized conversion of a batch of (3,H,W) cutouts to (N,H,W,3) RGB images.
+    """
+    if cutouts.ndim != 3 and cutouts.ndim != 4:
+        raise ValueError(f'Expected (N,3,H,W) or (3,H,W); got {cutouts.shape}')
+
+    if cutouts.ndim == 3:
+        cutouts = cutouts[np.newaxis, ...]
+    if cutouts.shape[1] != 3:
+        raise ValueError(f'Channel-first with 3 bands expected; got {cutouts.shape}')
+
+    N, _, H, W = cutouts.shape
+    out = np.empty((N, H, W, 3), dtype=np.float32)
+    for i in range(N):
+        rgb = generate_rgb(prep_cutout(cutouts[i]))
+        # sanitize any lingering NaNs/Infs
+        out[i] = np.nan_to_num(rgb, nan=0.0, posinf=0.0, neginf=0.0)
+    return out
