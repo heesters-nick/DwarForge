@@ -11,7 +11,7 @@
 #define MT_STACK_SIZE(MT_STACK_PTR) ((MT_STACK_PTR)->num_entries)
 #define MT_STACK_NOT_EMPTY(MT_STACK_PTR) ((MT_STACK_PTR)->num_entries > 0)
 
-typedef struct 
+typedef struct
 {
   mt_pixel *entries;
   INT_TYPE num_entries;

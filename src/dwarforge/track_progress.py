@@ -511,7 +511,7 @@ def debug_avg_processing_time(database):
     c.execute(
         """
         SELECT tile_id, band, start_time, end_time, (end_time - start_time) / 60.0 as duration_minutes
-        FROM processed_tiles 
+        FROM processed_tiles
         WHERE status = 'completed' AND start_time IS NOT NULL AND end_time IS NOT NULL
         LIMIT 5
         """

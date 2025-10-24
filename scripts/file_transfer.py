@@ -10,14 +10,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from dwarforge.config import load_settings
-from dwarforge.logging_setup import setup_logger
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from tqdm import tqdm
+
+from dwarforge.config import load_settings
+from dwarforge.logging_setup import setup_logger
 
 warnings.filterwarnings('ignore', message='file_cache is only supported with oauth2client<4.0.0')
 
@@ -43,7 +44,7 @@ class DriveUploader:
     def _load_file_cache(self):
         """Load the cache of previously uploaded files"""
         if self.file_cache_path.exists():
-            with open(self.file_cache_path, 'r') as f:
+            with open(self.file_cache_path) as f:
                 return json.load(f)
         return {}
 

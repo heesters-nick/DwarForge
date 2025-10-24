@@ -39,3 +39,7 @@ src/dwarforge.egg-info/
 .ruff_cache/
 ruff.toml
 requirements.txt
+.mypy_cache/
+.pytest_cache/
+combined_cutouts/
+.coverage

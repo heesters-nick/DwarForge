@@ -12,9 +12,10 @@ import sep
 from astropy.io import fits
 from astropy.io.fits import Header
 from astropy.wcs import WCS
+from scipy.ndimage import binary_dilation, label
+
 from dwarforge.postprocess import match_stars
 from dwarforge.utils import open_fits
-from scipy.ndimage import binary_dilation, label
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +289,7 @@ def source_detection(
         deblend_nthresh=deblend_nthresh,
         deblend_cont=deblend_cont,
     )
-    logger.debug(f'finished sep in {time.time()-sep_start:.2f} seconds.')
+    logger.debug(f'finished sep in {time.time() - sep_start:.2f} seconds.')
 
     if save_segmap:
         out_path_seg = file_path.with_stem(f'{file_path.stem}_sep_seg')

@@ -28,12 +28,12 @@
 
 #define MT_HAVE_SIGNIFICANT_ANCESTOR(IDX) \
   (mt_o->closest_significant_ancestors[IDX] != MT_NO_PARENT)
-  
+
 #define MT_DISTANCE(IDX) \
   (MT_HAVE_SIGNIFICANT_ANCESTOR(IDX) ? \
     mt->img.data[IDX] - \
       mt->img.data[mt_o->closest_significant_ancestors[IDX]] : \
-    mt->img.data[IDX])      
+    mt->img.data[IDX])
 
 struct mt_object_data;
 struct parameters;
@@ -49,7 +49,7 @@ typedef struct mt_parameters
 }mt_parameters;
 
 typedef struct mt_object_data
-{  
+{
   mt_data* mt;
   mt_parameters* paras;
   uint8_t* flags;

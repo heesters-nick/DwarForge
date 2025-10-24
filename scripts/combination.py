@@ -18,6 +18,9 @@ import numpy as np
 import pandas as pd
 import yaml
 from astropy.coordinates import SkyCoord
+from scipy.spatial import cKDTree
+from tqdm import tqdm
+
 from dwarforge.config import ensure_runtime_dirs, load_settings, settings_to_jsonable
 from dwarforge.download import download_worker
 from dwarforge.import_utils import input_to_tile_list, query_availability
@@ -43,8 +46,6 @@ from dwarforge.utils import (
     purge_previous_run,
     tile_str,
 )
-from scipy.spatial import cKDTree
-from tqdm import tqdm
 
 warnings.filterwarnings('ignore', message="'datfix' made the change", append=True)
 warnings.filterwarnings(
@@ -197,7 +198,7 @@ def append_lsb_data(
     with file_lock:
         with h5py.File(lsb_file_path, 'a', libver='latest') as f:
             # Get existing known_ids
-            existing_ids = set([x.decode('utf-8') for x in f['known_id'][:]])  # type: ignore
+            existing_ids = {x.decode('utf-8') for x in f['known_id'][:]}  # type: ignore
 
             # Create mask for new objects
             new_objects_mask = np.array([kid not in existing_ids for kid in known_ids[lsb_mask]])
@@ -722,7 +723,7 @@ def main() -> None:
             input_catalog = pd.read_csv(dwarf_catalog.path)
         except FileNotFoundError:
             logger.error(f'File not found: {dwarf_catalog.path}')
-            raise FileNotFoundError
+            raise
 
         _, tiles_x_bands, _ = input_to_tile_list(
             availability,
@@ -768,7 +769,7 @@ def main() -> None:
                     lsb_h5_lock = None
 
                 # dictionary to keep track of processed tiles per band in current run
-                processed_in_current_run = manager.dict({band: 0 for band in band_dict.keys()})
+                processed_in_current_run = manager.dict(dict.fromkeys(band_dict.keys(), 0))
 
                 unprocessed_jobs = get_unprocessed_jobs(
                     database=database,
@@ -783,7 +784,7 @@ def main() -> None:
                     group_tiles=cfg.combination.group_tiles_csv,
                 )
 
-                unprocessed_jobs_at_start = {band: 0 for band in band_dict.keys()}
+                unprocessed_jobs_at_start = dict.fromkeys(band_dict.keys(), 0)
 
                 for job in unprocessed_jobs:
                     logger.info(f'Job: {job}')

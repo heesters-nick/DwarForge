@@ -1,6 +1,7 @@
 """Statistical tests for max tree filtering."""
 
 import numpy as np
+
 from dwarforge.mtolib._ctype_classes import INIT_TYPE, SIGTEST_TYPE
 
 NO_PARENT = -3

@@ -1,8 +1,9 @@
 """Miscellaneous utilities."""
 
-import time
-from astropy.stats import gaussian_fwhm_to_sigma
 import argparse
+import time
+
+from astropy.stats import gaussian_fwhm_to_sigma
 
 
 def time_function(function, parameters, verbosity, task_string):
@@ -12,8 +13,8 @@ def time_function(function, parameters, verbosity, task_string):
     output = function(*parameters)
 
     if verbosity > 1:
-        elapsed_time = (time.time() - start_time)
-        print('{:.4} seconds to {}.'.format(elapsed_time, task_string))
+        elapsed_time = time.time() - start_time
+        print(f'{elapsed_time:.4} seconds to {task_string}.')
 
     return output
 

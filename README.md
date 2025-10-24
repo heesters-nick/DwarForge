@@ -19,12 +19,12 @@ cd dwarforge
 ```
 Then install the repository in editable mode so you can easily change the code on your local machine or cluster:
 ```
-pip install -e . 
+pip install -e .
 ```
 
 **vos X509/SSL certificate**
 
-To be able to download UNIONS data you need to be part of the collaboration (as long as the data is not public), have a CANFAR account and have a valid X509/SSL certificate on your machine. This certificate needs to be renewed every 10 days. In order to generate such a certificate, run the following command: 
+To be able to download UNIONS data you need to be part of the collaboration (as long as the data is not public), have a CANFAR account and have a valid X509/SSL certificate on your machine. This certificate needs to be renewed every 10 days. In order to generate such a certificate, run the following command:
 
 ```
 cadc-get-cert -u *yourusername*
@@ -43,7 +43,7 @@ DONE. 10 day certificate saved in /home/yourusername/.ssl/cadcproxy.pem
 - Set the band filter that should be processed as "anchor_band" (cfis-u | whigs-g | cfis_lsb-r | ps-i | wishes-z).
 - Define your input (tiles | coordinates | dataframe | all_available). For a quick test use either a set of tile numbers or coordinates in RA/Dec.
 - If you are running the script for the first time, set update_tiles and build_new_kd_tree to true. After that you can set both to false and only update when you know new tiles have been reduced.
-- Run ```python scripts/detection.py``` on the command line. This will download the image tiles corresponding to your input, add them to a process queue, several workers will preprocess the images, run MTO detection, filter detections, and save the rebinned image (4x4 pixels) and the MTO detections. 
+- Run ```python scripts/detection.py``` on the command line. This will download the image tiles corresponding to your input, add them to a process queue, several workers will preprocess the images, run MTO detection, filter detections, and save the rebinned image (4x4 pixels) and the MTO detections.
 - Rerun the script for two more bands.
 - Run ```python scripts/combination.py``` on the command line. This will cross-match detections in different bands to filter out false detections due to single-band artifacts or non-low-surface-brightness objects, create a per-tile catalog of detections, create RGB cutouts (256x256 pixels) of these and store them along with their meta data in .h5 files.
 - Run ```python scripts/inference.py``` on the command line to apply the trained deep learning Zoobot model to the created object cutouts and assign a probability that a given object is a dwarf galaxy.

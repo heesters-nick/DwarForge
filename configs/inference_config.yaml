@@ -26,10 +26,10 @@ cpu:
   # Number of worker processes to use
   # If null, will use CPU count - 1
   num_workers: 1
-  
+
   # Batch size for preprocessing (to manage memory)
   process_batch_size: 150
-  
+
   # Batch size for inference
   inference_batch_size: 150
 
@@ -37,16 +37,16 @@ cpu:
 gpu:
   # Number of CPU processes for preprocessing
   preprocessing_workers: 2
-  
+
   # Number of CPU processes for writing results
   writer_workers: 2
-  
+
   # Batch size for GPU inference (typically larger than CPU)
   batch_size: 128
-  
+
   # Batch size for preprocessing
   process_batch_size: 150
-  
+
   # Size of communication queues
   queue_size: 10
 

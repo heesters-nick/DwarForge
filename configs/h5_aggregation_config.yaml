@@ -13,7 +13,7 @@ monitoring:
     aggregation_s: 360  # aggregate over this many seconds
   progress:
     database_name: "progress_test_coord.db"   # choose a new name per run if you want a fresh DB
-    # **** CAREFUL **** 
+    # **** CAREFUL ****
     resume: false  # if false existing database and logs with the specified names will be overwritten
 
 runtime:

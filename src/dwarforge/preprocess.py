@@ -43,7 +43,7 @@ def remove_background(
     file_path: Path,
     bw: int = 200,
     bh: int = 200,
-    estimator: MedianBackground = MedianBackground(),
+    estimator: MedianBackground | None = None,
     save_file: bool = False,
 ) -> tuple[np.ndarray, Background2D, Path]:
     """
@@ -61,6 +61,9 @@ def remove_background(
     Returns:
         A tuple containing the background-subtracted image, the background model, and the path to the saved file.
     """
+    if estimator is None:
+        estimator = MedianBackground()
+
     sigma_clip = SigmaClip(sigma=3.0)
     bkg_estimator = estimator
     bkg = Background2D(
@@ -852,7 +855,7 @@ def streak_mask(data_masked, file_path, bkg_rms, table_dir, header, psf_multipli
         masks = []
         for i in streaks.index[streaks['real_streak'] == 1]:
             binary_image = np.zeros(data_masked.shape, dtype=np.uint8)
-            polygon = [(x, y) for x, y in zip((streaks.loc[i].x - 1), (streaks.loc[i].y - 1))]
+            polygon = list(zip(streaks.loc[i].x - 1, streaks.loc[i].y - 1, strict=False))
             mask_image = Image.fromarray(binary_image)
             draw = ImageDraw.Draw(mask_image)
             draw.polygon(polygon, fill=1)
@@ -1106,7 +1109,7 @@ def prep_tile(
         save_to_file=False,
         band=band,
     )
-    logger.debug(f'{tile_str(tile)}: detected anomalies in {time.time()-start:.2f} seconds.')
+    logger.debug(f'{tile_str(tile)}: detected anomalies in {time.time() - start:.2f} seconds.')
     # estimate the background
     start = time.time()
     _, bkg, _ = remove_background(
@@ -1117,7 +1120,7 @@ def prep_tile(
         bh=100,
         estimator=MedianBackground(),
     )
-    logger.debug(f'{tile_str(tile)}: estimated background in {time.time()-start:.2f} seconds.')
+    logger.debug(f'{tile_str(tile)}: estimated background in {time.time() - start:.2f} seconds.')
     # mask hot pixels
     start = time.time()
     data_ano_mask, _ = mask_hot_pixels(
@@ -1131,7 +1134,7 @@ def prep_tile(
         neighbor_ratio=0.2,
         save_file=False,
     )
-    logger.debug(f'{tile_str(tile)}: masked hot pixels in {time.time()-start:.2f} seconds.')
+    logger.debug(f'{tile_str(tile)}: masked hot pixels in {time.time() - start:.2f} seconds.')
     # find stars in the image from gaia
     star_df = find_stars(tile_str(tile), header_binned)
     # sort df to mask dim stars first, overlapping bright stars will mask over them, leaving a smoother image
@@ -1192,7 +1195,7 @@ def prep_tile(
                 min_axis_ratio=0.2,
                 save_file=False,
             )
-            logger.debug(f'Dilation took: {time.time()-start_dilate:.2f} seconds.')
+            logger.debug(f'Dilation took: {time.time() - start_dilate:.2f} seconds.')
 
         start = time.time()
 
@@ -1214,7 +1217,7 @@ def prep_tile(
                 save_file=False,
             )
         )
-        logger.debug(f'Small stuff masked in {time.time()-start:.2f} seconds.')
+        logger.debug(f'Small stuff masked in {time.time() - start:.2f} seconds.')
     except Exception as e:
         logger.error(f'Error using SEP: {e}')
         # Create background statistics map
@@ -1256,7 +1259,7 @@ def prep_tile(
         grid_size=25,
         band=band,
     )
-    logger.debug(f'{tile_str(tile)}: masked stars in {time.time()-start:.2f} seconds.')
+    logger.debug(f'{tile_str(tile)}: masked stars in {time.time() - start:.2f} seconds.')
 
     # If there is a bright star in the image MTO struggles to accurately estimate the background
     # so we remove it in these cases
@@ -1280,7 +1283,9 @@ def prep_tile(
             estimator=MedianBackground(),
             save_file=True,
         )
-        logger.debug(f'{tile_str(tile)}: subtracted background in {time.time()-start:.2f} seconds.')
+        logger.debug(
+            f'{tile_str(tile)}: subtracted background in {time.time() - start:.2f} seconds.'
+        )
         data_prepped, file_path_prepped = data_sub, file_path_sub
         # delete data products from intermediate steps
         delete_file(file_path_ano_mask)
@@ -1291,7 +1296,7 @@ def prep_tile(
         # delete data products from intermediate steps
         delete_file(file_path_ano_mask)
 
-    logger.info(f'{tile_str(tile)}: tile prepped in {time.time()-prep_start:.2f} seconds.')
+    logger.info(f'{tile_str(tile)}: tile prepped in {time.time() - prep_start:.2f} seconds.')
 
     return data_binned, data_prepped, file_path_prepped, header_binned
 

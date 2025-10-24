@@ -51,7 +51,7 @@ def read_fits_file(filename):
 
         return img_data
 
-    except IOError:
+    except OSError:
         print('Could not read file:', filename)
         sys.exit(1)
 
@@ -65,7 +65,7 @@ def get_fits_header(filename):
         hdulist.close()
         return header
 
-    except IOError:
+    except OSError:
         print('Could not read file:', filename)
     except:  # noqa: E722
         print('Could not read header')
@@ -159,7 +159,7 @@ def make_parser():
     parser.add_argument(
         '-out',
         type=str,
-        help='Location to save filtered image. ' 'Supports .fits and .png filenames',
+        help='Location to save filtered image. Supports .fits and .png filenames',
         default='out.png',
     )
     parser.add_argument(

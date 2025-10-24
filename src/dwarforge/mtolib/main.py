@@ -4,6 +4,7 @@
 from ctypes import c_double, c_float
 
 import numpy as np
+
 from dwarforge.mtolib import _ctype_classes as ct
 from dwarforge.mtolib import maxtree
 from dwarforge.mtolib.io_mto import (  # noqa: F401

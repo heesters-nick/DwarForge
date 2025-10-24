@@ -3,8 +3,9 @@
 import ctypes as ct
 from pathlib import Path
 
-import dwarforge.mtolib.significance_tests as mt_sig
 import numpy as np
+
+import dwarforge.mtolib.significance_tests as mt_sig
 from dwarforge.mtolib import _ctype_classes as mt_class
 from dwarforge.mtolib.utils import time_function
 

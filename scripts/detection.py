@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import psutil
 import yaml
+
 from dwarforge.config import ensure_runtime_dirs, load_settings, settings_to_jsonable
 from dwarforge.detection_utils import param_phot, run_mto
 from dwarforge.import_utils import input_to_tile_list, query_availability
@@ -444,7 +445,7 @@ def main() -> None:
     unprocessed_jobs_at_start = {}
 
     # dictionary to keep track of processed tiles per band in current run
-    processed_in_current_run = manager.dict({band: 0 for band in band_dict.keys()})
+    processed_in_current_run = manager.dict(dict.fromkeys(band_dict.keys(), 0))
 
     # Add main process ID
     process_ids.append(os.getpid())
@@ -472,7 +473,7 @@ def main() -> None:
             input_catalog = pd.read_csv(dwarf_catalog.path)
         except FileNotFoundError:
             logger.error(f'File not found: {dwarf_catalog.path}')
-            raise FileNotFoundError
+            raise
 
         # get the list of tiles
         _, tiles_x_bands, _ = input_to_tile_list(
@@ -502,7 +503,7 @@ def main() -> None:
             only_known_dwarfs=cfg.runtime.process_only_known_dwarfs,
         )
 
-        unprocessed_jobs_at_start = {band: 0 for band in band_dict.keys()}
+        unprocessed_jobs_at_start = dict.fromkeys(band_dict.keys(), 0)
 
         for job in unprocessed_jobs:
             logger.debug(f'Job: {job}')
@@ -606,10 +607,10 @@ def main() -> None:
                 stats = progress_results[band]
                 log_messages.append(f'\nProgress for band {band}:')
                 log_messages.append(
-                    f"  Overall: {stats['total_completed']}/{stats['total_available']} completed, {stats['total_failed']} failed, {stats['download_failed']} download failed, {stats['mostly_zeros']} mostly_zeros"
+                    f'  Overall: {stats["total_completed"]}/{stats["total_available"]} completed, {stats["total_failed"]} failed, {stats["download_failed"]} download failed, {stats["mostly_zeros"]} mostly_zeros'
                 )
                 log_messages.append(
-                    f"  Current run: {stats['current_run_processed']} processed, {stats['in_progress']} in progress, {stats['remaining_in_run']} remaining"
+                    f'  Current run: {stats["current_run_processed"]} processed, {stats["in_progress"]} in progress, {stats["remaining_in_run"]} remaining'
                 )
 
             # Log all messages together

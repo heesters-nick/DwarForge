@@ -8,11 +8,12 @@ import h5py
 import numpy as np
 import pandas as pd
 import yaml
+from tqdm import tqdm
+
 from dwarforge.config import ensure_runtime_dirs, load_settings, settings_to_jsonable
 from dwarforge.logging_setup import setup_logger
 from dwarforge.make_rbg import preprocess_cutout
 from dwarforge.utils import purge_previous_run
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +129,12 @@ def combine_h5_files():
 
                     if preprocess:
                         cutouts = np.array(f['images'])[subset_mask]
-                        assert (
-                            cutouts.ndim == 4
-                        ), f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
-                        assert (
-                            cutouts.shape[1] == 3
-                        ), f'Expected 3 bands, got shape: {cutouts.shape}'
+                        assert cutouts.ndim == 4, (
+                            f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
+                        )
+                        assert cutouts.shape[1] == 3, (
+                            f'Expected 3 bands, got shape: {cutouts.shape}'
+                        )
                         cutout_stack = np.zeros_like(cutouts, dtype=np.float32)
                         for i, cutout in enumerate(cutouts):
                             cutout_stack[i] = preprocess_cutout(cutout, mode=prep_mode)
@@ -173,12 +174,12 @@ def combine_h5_files():
 
                         if preprocess:
                             cutouts = np.array(f['images'])[remaining_mask]
-                            assert (
-                                cutouts.ndim == 4
-                            ), f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
-                            assert (
-                                cutouts.shape[1] == 3
-                            ), f'Expected 3 bands, got shape: {cutouts.shape}'
+                            assert cutouts.ndim == 4, (
+                                f'Unexpected cutout shape: {cutouts.shape}, expected 4 dimensions'
+                            )
+                            assert cutouts.shape[1] == 3, (
+                                f'Expected 3 bands, got shape: {cutouts.shape}'
+                            )
                             cutout_stack = np.zeros_like(cutouts, dtype=np.float32)
                             for i, cutout in enumerate(cutouts):
                                 cutout_stack[i] = preprocess_cutout(cutout, mode=prep_mode)

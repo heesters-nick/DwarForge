@@ -1,7 +1,7 @@
 import datetime
 import logging
 import os
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal
 
 import h5py
 import numpy as np
@@ -186,7 +186,7 @@ def generate_rgb(
 
 
 def adjust_flux_with_zp(
-    flux: np.ndarray, current_zp: Union[float, int], standard_zp: Union[float, int]
+    flux: np.ndarray, current_zp: float | int, standard_zp: float | int
 ) -> np.ndarray:
     """
     Adjust flux values to a standard zero-point.
@@ -345,8 +345,8 @@ def process_objects_with_model(
     model: Any,  # Ideally replace Any with torch.nn.Module or specific model type
     base_path: str = '/projects/unions/ssl/data/raw/tiles/dwarforge',
     accumulation_size: int = 5000,
-    preprocessing_params: Optional[Dict[str, Any]] = None,
-) -> Dict[str, int]:
+    preprocessing_params: dict[str, Any] | None = None,
+) -> dict[str, int]:
     """
     Process objects from a catalog with a machine learning model and save results.
 
@@ -408,7 +408,7 @@ def process_objects_with_model(
     grouped_catalog = catalog.groupby('tile')
 
     # Initialize data collection
-    latent_vectors: List[np.ndarray] = []
+    latent_vectors: list[np.ndarray] = []
     metadata = {
         'unique_id': [],
         'ra': [],
@@ -424,7 +424,7 @@ def process_objects_with_model(
     objects_not_found = 0
 
     # Accumulation buffers
-    accumulated_images: List[np.ndarray] = []
+    accumulated_images: list[np.ndarray] = []
     accumulated_metadata = {
         key: [] for key in metadata.keys()
     }  # Lists to hold batches before inference
@@ -467,8 +467,8 @@ def process_objects_with_model(
                 h5_id_to_index = {uid: idx for idx, uid in enumerate(h5_unique_ids)}  # type: ignore
 
                 # 4. Identify indices in H5 and corresponding catalog rows
-                valid_indices: List[int] = []  # Indices within H5 file
-                catalog_indices_to_keep: List[int] = []  # Indices within tile_objects
+                valid_indices: list[int] = []  # Indices within H5 file
+                catalog_indices_to_keep: list[int] = []  # Indices within tile_objects
 
                 for cat_idx, target_id in enumerate(target_ids):
                     h5_idx = h5_id_to_index.get(target_id)  # More efficient than 'in' + lookup

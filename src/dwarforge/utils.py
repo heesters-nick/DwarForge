@@ -364,13 +364,13 @@ class TileAvailability:
         counts = np.sum(self.availability_matrix, axis=1)
         bands_available, tile_counts = np.unique(counts, return_counts=True)
 
-        counts_dict = dict(zip(bands_available, tile_counts))
+        counts_dict = dict(zip(bands_available, tile_counts, strict=False))
 
         if at_least:
             at_least_counts = np.zeros_like(bands_available)
-            for i, count in enumerate(bands_available):
+            for i, _ in enumerate(bands_available):
                 at_least_counts[i] = np.sum(tile_counts[i:])
-            counts_dict = dict(zip(bands_available, at_least_counts))
+            counts_dict = dict(zip(bands_available, at_least_counts, strict=False))
 
         return counts_dict
 
@@ -424,7 +424,7 @@ class TileAvailability:
         logger.info('Number of currently available tiles per band:')
         max_band_name_length = max(map(len, self.band_dict.keys()))  # for output format
         for band_name, count in zip(
-            self.band_dict.keys(), np.sum(self.availability_matrix, axis=0)
+            self.band_dict.keys(), np.sum(self.availability_matrix, axis=0), strict=False
         ):
             logger.info(f'{band_name.ljust(max_band_name_length)}: {count}')
 
@@ -874,8 +874,10 @@ def get_coord_median(coords: list[SkyCoord]) -> SkyCoord:
         return median_skycoord
     except Exception as e:
         # Add more context to the error
-        logger.error(f'Error in get_coord_median for input coords (first few shown): {coords[:3]}')
-        raise ValueError(f'Could not calculate coordinate median: {e}')
+        logger.error(
+            f'Error in get_coord_median for input coords (first few shown): {coords[:3]}. Error: {e}'
+        )
+        raise
 
 
 def purge_previous_run(cfg) -> None:

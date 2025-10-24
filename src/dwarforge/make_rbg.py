@@ -2,9 +2,10 @@ import logging
 import warnings
 
 import numpy as np
-from dwarforge.detection_utils import detect_anomaly_simple
 from scipy.interpolate import griddata
 from scipy.ndimage import binary_dilation, binary_fill_holes, label
+
+from dwarforge.detection_utils import detect_anomaly_simple
 
 
 def process_channels(
@@ -102,7 +103,7 @@ def find_percentile_from_target(cutouts, target_value):
     bands = ['R', 'G', 'B']  # Define band names according to the order of input arrays
     percentiles = np.arange(100, 0, -0.01)  # Creating percentiles from 100 to 0 with 0.01 steps
 
-    for band, cutout in zip(bands, cutouts):
+    for band, cutout in zip(bands, cutouts, strict=False):
         # We calculate values at each percentile
         values_at_percentiles = np.nanpercentile(cutout, percentiles)
 

@@ -11,6 +11,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import torch
+
 from dwarforge.make_rbg import preprocess_cutout
 from dwarforge.zoobot_utils import ensemble_predict, load_models
 
@@ -313,7 +314,7 @@ def cpu_write_worker(results_queue, error_queue, completion_queue, done_event, c
                     df = pd.read_parquet(parquet_path)
 
                     # Create mapping from object ID to prediction
-                    prediction_map = dict(zip(object_ids, predictions))
+                    prediction_map = dict(zip(object_ids, predictions, strict=False))
 
                     # Update dataframe with predictions
                     df['zoobot_pred_v2'] = df['unique_id'].map(prediction_map)
@@ -372,7 +373,7 @@ def read_tile_data(filepath):
         numpy.ndarray: array of tile strings
     """
     # Read all lines from the file
-    with open(filepath, 'r') as f:
+    with open(filepath) as f:
         lines = [line.strip() for line in f.readlines() if line.strip()]
 
     # Create numpy array

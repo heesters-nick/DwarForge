@@ -3,7 +3,7 @@ import logging
 import multiprocessing as mp
 import os
 import time
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal
 
 import h5py
 import numpy as np
@@ -200,7 +200,7 @@ def generate_rgb(
 
 
 def adjust_flux_with_zp(
-    flux: np.ndarray, current_zp: Union[float, int], standard_zp: Union[float, int]
+    flux: np.ndarray, current_zp: float | int, standard_zp: float | int
 ) -> np.ndarray:
     """
     Adjust flux values to a standard zero-point.
@@ -466,8 +466,8 @@ def process_single_tile(args):
                 h5_unique_ids = h5_unique_ids.flatten()  # type: ignore
 
             h5_id_to_index = {uid: idx for idx, uid in enumerate(h5_unique_ids)}  # type: ignore
-            valid_indices: List[int] = []
-            catalog_indices_to_keep: List[int] = []
+            valid_indices: list[int] = []
+            catalog_indices_to_keep: list[int] = []
 
             for cat_idx, target_id in enumerate(target_ids):
                 h5_idx = h5_id_to_index.get(target_id)
@@ -618,10 +618,10 @@ def process_objects_with_model_parallel(
     output_path: str,
     model_name: str,  # Pass model name string for initializer
     base_path: str = '/projects/unions/ssl/data/raw/tiles/dwarforge',
-    preprocessing_params: Optional[Dict[str, Any]] = None,
+    preprocessing_params: dict[str, Any] | None = None,
     num_workers: int = NUM_CORES,  # Use global NUM_CORES
     inference_mode: str = 'desi_unions_matches',
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """
     Processes objects in parallel using multiple workers with initializer for model loading.
     """
@@ -698,7 +698,7 @@ def process_objects_with_model_parallel(
         worker_args.append(args)
 
     # Initialize result accumulators
-    all_latent_vectors_list: List[np.ndarray] = []
+    all_latent_vectors_list: list[np.ndarray] = []
     # Define expected metadata keys based on process_single_tile return
     if inference_mode == 'all_mto':
         metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'zoobot_pred', 'zoobot_pred_v2']

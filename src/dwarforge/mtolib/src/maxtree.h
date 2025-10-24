@@ -67,7 +67,7 @@ typedef struct
   mt_heap heap;
   mt_stack stack;
   image img;
-  mt_connectivity connectivity;  
+  mt_connectivity connectivity;
   int verbosity_level;
 } mt_data;
 

@@ -18,7 +18,7 @@ void mt_relevant_nodes(mt_object_data* mt_o)
   // Create a heap
   mt_heap heap;
   mt_heap_alloc_entries(&heap);
-  
+
   // Iterate over image pixels
   SHORT_TYPE y;
   for (y = 0; y != mt->img.height; ++y)
@@ -54,14 +54,14 @@ void mt_relevant_nodes(mt_object_data* mt_o)
   mt_o->relevant_indices_len = MT_HEAP_SIZE(&heap);
   mt_o->relevant_indices = malloc(MT_HEAP_SIZE(&heap) *
     sizeof(*mt_o->relevant_indices));
- 
+
 
   // Print number of relevant nodes
   if (mt->verbosity_level > 1)
   {
-    printf("Number of nodes to be tested: %d.\n", 
+    printf("Number of nodes to be tested: %d.\n",
       mt_o->relevant_indices_len);
-      
+
   }
 
   // Move nodes from heap into relevant indices list
@@ -118,7 +118,7 @@ void mt_significant_nodes_up(mt_object_data* mt_o)
 
   // Get pointer to data
   mt_data *mt = mt_o->mt;
-  
+
   // Count number of significant objects
   INT_TYPE num_significant = 0;
 
@@ -129,7 +129,7 @@ void mt_significant_nodes_up(mt_object_data* mt_o)
 	// Get ith object and its parent
     INT_TYPE node_idx = mt_o->relevant_indices[i];
     INT_TYPE parent_idx = mt->nodes[node_idx].parent;
-    
+
     // If parent is significant, set closest significant ancestor to parent
     if (MT_SIGNIFICANT(parent_idx))
     {
@@ -141,23 +141,23 @@ void mt_significant_nodes_up(mt_object_data* mt_o)
       mt_o->closest_significant_ancestors[node_idx] =
         mt_o->closest_significant_ancestors[parent_idx];
     }
-    
+
     // TEST THE OBJECT - if significant, set as such and add to count
     if (mt_o->node_significance_test(mt_o, node_idx))
     {
       MT_SET_SIGNIFICANT(node_idx);
-      
+
       ++num_significant;
-      
+
       mt_update_parent_main_branch(mt_o, node_idx);
     }
   }
-  
+
   if (mt->verbosity_level > 1)
   {
     printf("%d significant nodes.\n", num_significant);
   }
-  
+
   mt_o->num_significant_nodes = num_significant;
 }
 
@@ -218,11 +218,11 @@ void mt_find_objects(mt_object_data* mt_o)
 
   INT_TYPE num_objects = 0;
   INT_TYPE num_objects_nested = 0;
-  
+
   INT_TYPE i;
 
   // Iterate over pixels in image
-  for (i = 0; i != mt->img.size; ++i)  
+  for (i = 0; i != mt->img.size; ++i)
   {
     // Skip if no significant flag
     if (!MT_SIGNIFICANT(i))
@@ -262,7 +262,7 @@ void mt_find_objects(mt_object_data* mt_o)
     printf("Found %d objects (including %d nested).\n", num_objects,
       num_objects_nested);
   }
-  
+
   mt_o->num_objects = num_objects;
 }
 
@@ -271,10 +271,10 @@ void mt_main_power_branches(mt_object_data* mt_o)
   // Find the descendant of each node with the highest power
 
   mt_data *mt = mt_o->mt;
-  
+
   INT_TYPE i;
   // Iterate over image pixels
-  for (i = 0; i != mt->img.size; ++i)  
+  for (i = 0; i != mt->img.size; ++i)
   {
     // Skip the root
     if (MT_IS_ROOT(mt, i))
@@ -316,35 +316,35 @@ void mt_move_up(mt_object_data* mt_o)
   }
 
   // Iterate over image pixels
-  INT_TYPE i;  
-  for (i = 0; i != mt->img.size; ++i)  
-  {  
+  INT_TYPE i;
+  for (i = 0; i != mt->img.size; ++i)
+  {
 	// Skip if the node is not an object or is marked as 'don't move'
     if (!MT_OBJECT(i) || MT_DONT_MOVE(i))
     {
       continue;
     }
-    
+
     // Mark as not an object
     MT_UNSET_OBJECT(i);
-    
+
     // Base = pixel value - distance from nearest significant ancestor
     FLOAT_TYPE base = mt->img.data[i] - MT_DISTANCE(i);
-      
+
     // scale by gain, background variance, move_factor
     // seems a tad hacky
     base += mt_o->paras->move_factor *
       sqrt(base / mt_o->paras->gain + mt_o->paras->bg_variance);
-            
+
     INT_TYPE next_idx = i;
     // Find next id - first pixel with value less than base or no descendants
     // Check pixels by descending through (significant) descendants
     while (mt->img.data[next_idx] < base)
-    {      
-    
+    {
+
       if (MT_HAVE_SIGNIFICANT_DESCENDANT(next_idx))
       {
-        next_idx = mt_o->main_branches[next_idx];        
+        next_idx = mt_o->main_branches[next_idx];
       }
       else if (MT_HAVE_DESCENDANT(next_idx))
       {
@@ -355,8 +355,8 @@ void mt_move_up(mt_object_data* mt_o)
         break;
       }
     }
-    
-    // Mark the next ID as an object that cannot be moved    
+
+    // Mark the next ID as an object that cannot be moved
     MT_SET_OBJECT(next_idx);
     MT_SET_DONT_MOVE(next_idx);
   }
@@ -369,7 +369,7 @@ void mt_objects_free(mt_object_data* mt_o)
   free(mt_o->flags);
   free(mt_o->main_branches);
   free(mt_o->main_power_branches);
-  free(mt_o->relevant_indices);  
+  free(mt_o->relevant_indices);
 
   if (mt_o->node_significance_test_data_free != NULL)
   {
@@ -421,7 +421,7 @@ void mt_objects(mt_object_data* mt_o)
   }
 
   mt_object_ids(mt_o);
-    
+
 }
 
 // Marks object ids
@@ -497,9 +497,9 @@ void node_significance_test_data_clear(mt_object_data* mt_o)
   {
     mt_o->node_significance_test_data_free(mt_o);
   }
-  
+
   mt_o->node_significance_test_data_free = NULL;
-  mt_o->node_significance_test_data = NULL;  
+  mt_o->node_significance_test_data = NULL;
 }
 
 
@@ -508,8 +508,8 @@ FLOAT_TYPE mt_noise_variance(mt_object_data* mt_o,
 {
   mt_data* mt = mt_o->mt;
 
-  assert(mt_o->relevant_indices_len > 0); 
-  
+  assert(mt_o->relevant_indices_len > 0);
+
   FLOAT_TYPE variance = mt_o->paras->bg_variance;
 
   if (MT_HAVE_SIGNIFICANT_ANCESTOR(node_idx))
@@ -519,31 +519,31 @@ FLOAT_TYPE mt_noise_variance(mt_object_data* mt_o,
       mt_o->paras->gain;
   }
 
-  
+
   if (max_normalized_distance >= 0)
   {
     FLOAT_TYPE distance = MT_DISTANCE(node_idx);
-    
+
     FLOAT_TYPE rms = sqrt(variance);
-    
+
     if (distance / rms > max_normalized_distance)
     {
       FLOAT_TYPE max_normalized_distance_sqr = max_normalized_distance *
         max_normalized_distance;
-        
+
       FLOAT_TYPE gain_sqr = mt_o->paras->gain * mt_o->paras->gain;
-      
+
       FLOAT_TYPE b = 2 * mt->img.data[node_idx] * mt_o->paras->gain;
-        
+
       FLOAT_TYPE f_a = b + max_normalized_distance_sqr - max_normalized_distance *
           sqrt(4 * mt_o->paras->bg_variance * gain_sqr + 2 * b + max_normalized_distance_sqr);
-          
+
       f_a /= 2 * mt_o->paras->gain;
-      
+
       variance = f_a / mt_o->paras->gain + mt_o->paras->bg_variance;
     }
   }
-  
+
   return variance;
 }
 
@@ -552,31 +552,31 @@ FLOAT_TYPE mt_alternative_power_definition(mt_object_data* mt_o,
   INT_TYPE node_idx, FLOAT_TYPE max_normalized_distance)
 {
   mt_data* mt = mt_o->mt;
-  
-  assert(mt_o->relevant_indices_len > 0); 
-  
+
+  assert(mt_o->relevant_indices_len > 0);
+
   mt_node *node = mt->nodes + node_idx ;
-  mt_node_attributes *attr = mt->nodes_attributes + node_idx; 
-  
-  INT_TYPE parent_idx = node->parent;  
-  
+  mt_node_attributes *attr = mt->nodes_attributes + node_idx;
+
+  INT_TYPE parent_idx = node->parent;
+
   // added distance for the power calculation.
   FLOAT_TYPE delta;
   if (MT_HAVE_SIGNIFICANT_ANCESTOR(node_idx))
   {
     delta = mt->img.data[parent_idx] -
-      mt->img.data[mt_o->closest_significant_ancestors[node_idx]];      
+      mt->img.data[mt_o->closest_significant_ancestors[node_idx]];
   }
   else
   {
-    delta = mt->img.data[parent_idx];    
-  }  
-      
+    delta = mt->img.data[parent_idx];
+  }
+
   if (max_normalized_distance >= 0)
   {
     FLOAT_TYPE rms = sqrt(mt_noise_variance(mt_o,
       node_idx, max_normalized_distance));
-    
+
     FLOAT_TYPE distance = MT_DISTANCE(node_idx);
 
     //printf("%f\n", distance / rms);
@@ -584,8 +584,8 @@ FLOAT_TYPE mt_alternative_power_definition(mt_object_data* mt_o,
     if (distance / rms > max_normalized_distance)
     {
       delta = max_normalized_distance * rms - mt->img.data[parent_idx];
-    }  
+    }
   }
-    
+
   return attr->power + delta * (2 * attr->volume + delta * node->area);
 }

@@ -93,7 +93,7 @@ def _is_new_id(x: Any) -> bool:
     # "new" means: NaN/None/empty/"None" (string)
     if x is None:
         return True
-    if isinstance(x, (float, np.floating)) and np.isnan(x):
+    if isinstance(x, (float | np.floating)) and np.isnan(x):
         return True
     if isinstance(x, str) and (
         x.strip() == '' or x.strip().lower() == 'none' or x.strip().lower() == 'nan'
@@ -164,7 +164,7 @@ def plot_cutouts(
                     f'{ra:.4f}, {dec:.4f}',
                     color=status_color,
                     fontweight='bold',
-                    bbox=dict(facecolor='black', alpha=0.7, pad=2),
+                    bbox={'facecolor': 'black', 'alpha': 0.7, 'pad': 2},
                     transform=ax.transAxes,
                     va='bottom',
                     ha='right',
@@ -178,7 +178,7 @@ def plot_cutouts(
                         str(obj_id),
                         color=status_color,
                         fontweight='bold',
-                        bbox=dict(facecolor='black', alpha=0.7, pad=2),
+                        bbox={'facecolor': 'black', 'alpha': 0.7, 'pad': 2},
                         transform=ax.transAxes,
                         va='top',
                         ha='left',
@@ -237,7 +237,7 @@ def plot_cutouts(
                 f'{ra:.4f}, {dec:.4f}',
                 color=status_color,
                 fontweight='bold',
-                bbox=dict(facecolor='black', alpha=0.7, pad=2),
+                bbox={'facecolor': 'black', 'alpha': 0.7, 'pad': 2},
                 transform=rgb_ax.transAxes,
                 va='bottom',
                 ha='right',
@@ -251,7 +251,7 @@ def plot_cutouts(
                     str(obj_id),
                     color=status_color,
                     fontweight='bold',
-                    bbox=dict(facecolor='black', alpha=0.7, pad=2),
+                    bbox={'facecolor': 'black', 'alpha': 0.7, 'pad': 2},
                     transform=rgb_ax.transAxes,
                     va='top',
                     ha='left',

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, cast
+from typing import Any, Literal, cast
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,7 +42,7 @@ class Runtime(BaseModel):
     num_cores: int
     prefetch_factor: int
     anchor_band: str
-    considered_bands: List[str]
+    considered_bands: list[str]
     use_full_resolution: bool
     process_all_available: bool
     process_only_known_dwarfs: bool
@@ -50,7 +50,7 @@ class Runtime(BaseModel):
 
 class CombinationCfg(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    bands_to_combine: List[str]
+    bands_to_combine: list[str]
     max_match_sep_arcsec: float
     negatives_per_positive: int
     accumulate_lsb_to_h5: bool
@@ -181,8 +181,8 @@ class RawConfig(BaseModel):
     cutouts: Cutouts
     inputs: Inputs
     paths_common: PathsCommon
-    paths_by_machine: Dict[str, PathsByMachineEntry]
-    bands: Dict[str, Band]
+    paths_by_machine: dict[str, PathsByMachineEntry]
+    bands: dict[str, Band]
     catalog: CatalogCfg
     h5_aggregation: H5AggregationCfg
 
@@ -214,13 +214,13 @@ class Settings(BaseModel):
     detection: Detection
     cutouts: Cutouts
     inputs: Inputs
-    bands: Dict[str, Band]
+    bands: dict[str, Band]
     paths: PathsResolved
     catalog: CatalogCfg
     h5_aggregation: H5AggregationCfg
 
     @model_validator(mode='after')
-    def _validate(self) -> 'Settings':
+    def _validate(self) -> Settings:
         if self.runtime.anchor_band not in self.runtime.considered_bands:
             raise ValueError('runtime.anchor_band must appear in runtime.considered_bands')
         for b in self.runtime.considered_bands:
@@ -260,9 +260,9 @@ class Settings(BaseModel):
 
 
 def load_settings(
-    path: str = 'configs/default.yaml', machine_override: Optional[str] = None
+    path: str = 'configs/default.yaml', machine_override: str | None = None
 ) -> Settings:
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, encoding='utf-8') as f:
         raw = RawConfig.model_validate(yaml.safe_load(f))
     machine = machine_override or raw.machine
     if machine not in raw.paths_by_machine:
@@ -328,9 +328,9 @@ def load_settings(
     )
 
 
-def settings_to_jsonable(cfg: Settings) -> Dict[str, Any]:
+def settings_to_jsonable(cfg: Settings) -> dict[str, Any]:
     # Pydantic v2: turn Paths into strings etc.
-    return cast(Dict[str, Any], cfg.model_dump(mode='json'))
+    return cast(dict[str, Any], cfg.model_dump(mode='json'))
 
 
 def ensure_runtime_dirs(cfg: Settings) -> None:

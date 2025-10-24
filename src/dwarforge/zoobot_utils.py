@@ -79,7 +79,7 @@ class SimpleDataset(Dataset):
 
 class ZooBot_lightning_v1(pl.LightningModule):
     def __init__(self, zoobot_size, zoobot_blocks, learning_rate, learning_decay):
-        super(ZooBot_lightning_v1, self).__init__()
+        super().__init__()
         self.save_hyperparameters()  # Saves all arguments for checkpointing
 
         # Define the model
@@ -269,7 +269,7 @@ class ZooBot_lightning(pl.LightningModule):
         loss_type='kld',
         focal_gamma=2.0,
     ):
-        super(ZooBot_lightning, self).__init__()
+        super().__init__()
         self.save_hyperparameters()  # Saves all arguments for checkpointing
 
         if self.hparams.loss_type not in ['focal', 'kld']:  # type: ignore
@@ -746,7 +746,7 @@ class ZooBot_lightning(pl.LightningModule):
         }
 
 
-class AddBimodalNoise(object):
+class AddBimodalNoise:
     def __init__(self, means, stds=None, weights=None, noise_scale=0.1):
         """
         Args:
@@ -911,7 +911,7 @@ def ensemble_predict(models, preprocessed_images, batch_size=64, device=None):
     all_model_predictions = []
 
     # Get predictions from each model
-    for model_idx, model in enumerate(models):
+    for _, model in enumerate(models):
         # Ensure model is on the correct device
         model = model.to(device)
 

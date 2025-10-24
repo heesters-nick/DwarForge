@@ -4,8 +4,9 @@ import joblib
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
-from dwarforge.utils import relate_coord_tile
 from scipy.spatial import cKDTree
+
+from dwarforge.utils import relate_coord_tile
 
 
 def build_tree(tiles, tile_info_dir, save=True):
@@ -54,7 +55,9 @@ class TileWCS:
     Class to create a WCS object for a tile.
     """
 
-    def __init__(self, wcs_keywords={}):
+    def __init__(self, wcs_keywords=None):
+        if wcs_keywords is None:
+            wcs_keywords = {}
         wcs_keywords.update(
             {
                 'NAXIS': 2,
@@ -95,7 +98,7 @@ def find_tile(tree, tiles, object_coord):
     coord_xyz = coord_c.cartesian.xyz.value  # type: ignore
     dists, indices = tree.query(coord_xyz, k=4)
     wcs = TileWCS()
-    for dist, idx in zip(dists, indices):
+    for dist, idx in zip(dists, indices, strict=False):
         wcs.set_coords(relate_coord_tile(nums=tiles[idx]))
         if wcs.wcs_tile.footprint_contains(coord_c):
             return tiles[idx], dist

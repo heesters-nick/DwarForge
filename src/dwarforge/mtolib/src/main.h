@@ -18,7 +18,7 @@
 /* End of settings */
 
 #define INT_TYPE   int32_t
-#define SHORT_TYPE int16_t 
+#define SHORT_TYPE int16_t
 
 #define FLOAT_TYPE float
 
@@ -56,43 +56,43 @@ static inline void error(const char* format, ...)
   va_start(arg_ptr, format);
   vfprintf(stderr, format, arg_ptr);
   va_end(arg_ptr);
-  
+
   exit(EXIT_FAILURE);
 }
 
 static inline void* safe_malloc(size_t size)
 {
   void *ptr = malloc(size);
-    
+
   if (ptr == NULL)
   {
     error("malloc(%d) failed.\n", size);
   }
-  
+
   return ptr;
 }
 
 static inline void* safe_calloc(size_t num_elem, size_t size)
 {
   void *ptr = calloc(num_elem, size);
-    
+
   if (ptr == NULL)
   {
     error("calloc(%d, %d) failed.\n", num_elem, size);
   }
-  
+
   return ptr;
 }
 
 static inline void* safe_realloc(void *ptr, size_t size)
 {
   ptr = realloc(ptr, size);
-    
+
   if (ptr == NULL)
   {
     error("realloc(ptr, %d) failed.\n", size);
   }
-  
+
   return ptr;
 }
 

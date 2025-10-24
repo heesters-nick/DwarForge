@@ -18,6 +18,8 @@ import pandas as pd
 import psutil
 import torch
 import yaml
+from tqdm import tqdm
+
 from dwarforge.inference_utils import (
     cpu_preprocess_worker,
     cpu_write_worker,
@@ -27,7 +29,6 @@ from dwarforge.inference_utils import (
 )
 from dwarforge.logging_setup import setup_logger
 from dwarforge.zoobot_utils import ensemble_predict, load_models
-from tqdm import tqdm
 
 DEFAULT_CONFIG = {
     # General settings
@@ -102,7 +103,7 @@ def load_config(config_path):
 
     # Load configuration from file
     if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
+        with open(config_path) as f:
             file_config = yaml.safe_load(f)
             # Update default config with file values
             config.update(file_config)
@@ -253,7 +254,7 @@ def worker_process(tile_batch, model_paths, process_batch_size, inference_batch_
             df = pd.read_parquet(parquet_path)
 
             # Create a mapping from object_id to prediction
-            prediction_map = dict(zip(object_ids, all_predictions))  # type: ignore
+            prediction_map = dict(zip(object_ids, all_predictions, strict=False))  # type: ignore
 
             # Add predictions to dataframe
             df['zoobot_pred_v2'] = df['unique_id'].map(prediction_map)
@@ -433,7 +434,7 @@ def worker_process_shared(
 
             # Update Parquet file with predictions
             df = pd.read_parquet(parquet_path)
-            prediction_map = dict(zip(object_ids, all_predictions))  # type: ignore
+            prediction_map = dict(zip(object_ids, all_predictions, strict=False))  # type: ignore
             df['zoobot_pred_v2'] = df['unique_id'].map(prediction_map)
             parquet_temp_path = f'{parquet_path}.temp'
             df.to_parquet(parquet_temp_path, index=False)
@@ -911,7 +912,7 @@ def resume_from_failed(config):
         return
 
     # Read failed tile numbers
-    with open('failed_tiles.txt', 'r') as f:
+    with open('failed_tiles.txt') as f:
         failed_tile_numbers = [line.strip() for line in f.readlines()]
 
     logger.info(f'Found {len(failed_tile_numbers)} failed tiles to retry')

@@ -22,31 +22,31 @@ int mt_node_test_4(mt_object_data* mt_o, INT_TYPE node_idx)
 
   FLOAT_TYPE variance =
     mt_noise_variance(mt_o, node_idx, MT_NO_MAX_DISTANCE);
-    
+
   FLOAT_TYPE min_distance =
     *((FLOAT_TYPE *)mt_o->node_significance_test_data);
-    
+
   if (min_distance > 0 &&
     MT_DISTANCE(node_idx) / sqrt(variance) < min_distance)
   {
     return 0;
   }
-  
+
   FLOAT_TYPE power = mt_alternative_power_definition(mt_o, node_idx,
     MT_NO_MAX_DISTANCE);
-    
+
   INT_TYPE area = mt->nodes[node_idx].area;
-    
+
   FLOAT_TYPE power_normalized = power / variance / area;
-  
+
   if (area > max_area)
   {
     area = max_area;
-  }  
+  }
 
   FLOAT_TYPE area_to_2 = area * area;
   FLOAT_TYPE area_to_3 = area_to_2 * area;
-  
+
   FLOAT_TYPE x = p1 * area_to_3 + p2 * area_to_2 + p3 * area + p4;
   x /= area_to_3 + q1 * area_to_2 + q2 * area + q3;
 
@@ -56,7 +56,7 @@ int mt_node_test_4(mt_object_data* mt_o, INT_TYPE node_idx)
 void mt_node_test_4_data_free(mt_object_data* mt_o)
 {
   free(mt_o->node_significance_test_data);
-  
+
   mt_o->node_significance_test_data = NULL;
 }
 

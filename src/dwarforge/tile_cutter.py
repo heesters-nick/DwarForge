@@ -12,6 +12,7 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.nddata import Cutout2D
 from astropy.wcs.utils import skycoord_to_pixel
+
 from dwarforge.kd_tree import TileWCS, query_tree
 from dwarforge.utils import TileAvailability, relate_coord_tile, tile_str
 
@@ -179,7 +180,7 @@ def download_tile_one_band(
         # change to path mode
         temp_path.rename(final_path)
         logger.info(
-            f'Successfully downloaded tile {tile_str(tile_numbers)} for band {band} in {np.round(time.time()-start_time, 1)} seconds.'
+            f'Successfully downloaded tile {tile_str(tile_numbers)} for band {band} in {np.round(time.time() - start_time, 1)} seconds.'
         )
         return True
 
@@ -314,7 +315,7 @@ def make_cutouts_all_bands(avail, tile, obj_in_tile, download_dir, in_dict, size
         tile_fitsfilename = f'{prefix}{delimiter}{str(tile[0]).zfill(zfill)}{delimiter}{str(tile[1]).zfill(zfill)}{suffix}'
         with fits.open(os.path.join(tile_dir, tile_fitsfilename), memmap=True) as hdul:  # type: ignore
             data = hdul[fits_ext].data  # type: ignore
-        for i, (x, y) in enumerate(zip(obj_in_tile.x.values, obj_in_tile.y.values)):
+        for i, (x, y) in enumerate(zip(obj_in_tile.x.values, obj_in_tile.y.values, strict=False)):
             cutout[i, j] = make_cutout(data, x, y, size)
     return cutout
 

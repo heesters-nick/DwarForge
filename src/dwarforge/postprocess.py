@@ -166,7 +166,7 @@ def match_cats(df_det, df_label, tile, pixel_scale, max_sep=15.0, re_multiplier=
             matches.append((idx, best_match[0], best_match[2]))
 
     if matches:
-        label_match_idx, det_match_idx, match_distances = zip(*matches)
+        label_match_idx, det_match_idx, match_distances = zip(*matches, strict=False)
     else:
         label_match_idx, det_match_idx, match_distances = [], [], []
     label_matches = df_label.loc[list(label_match_idx)].reset_index(drop=True)
@@ -389,7 +389,7 @@ def create_segmented_cutouts(data, tile_str, segmap, object_ids, xs, ys, cutout_
     cutouts_seg = np.zeros((len(object_ids), cutout_size, cutout_size), dtype=data.dtype)
     cutout_empty = np.zeros((cutout_size, cutout_size), dtype=data.dtype)
 
-    for i, (obj_id, x, y) in enumerate(zip(object_ids, xs, ys)):
+    for i, (obj_id, x, y) in enumerate(zip(object_ids, xs, ys, strict=False)):
         cutouts[i], cutouts_seg[i] = cutout2d_segmented(
             data, tile_str, segmap, obj_id, x, y, cutout_size, cutout_empty.copy(), seg_mode
         )
@@ -552,7 +552,7 @@ def match_coordinates(band1, band2, band_data, max_sep=15.0):
 def match_coordinates_across_bands(
     band_data: dict,
     max_sep: float = 10.0,
-    band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i'],
+    band_priority: list | None = None,
 ) -> pd.DataFrame:
     """
     Cross-match detections, refining multi-band groups and keeping specific
@@ -567,6 +567,8 @@ def match_coordinates_across_bands(
     Returns:
         DataFrame with refined matches and allowed single-band detections.
     """
+    if band_priority is None:
+        band_priority = ['cfis_lsb-r', 'whigs-g', 'ps-i']
     # --- 1. Define Output Structure ---
     band_specific_cols = [
         'ID',
@@ -655,7 +657,7 @@ def match_coordinates_across_bands(
             combined_coords, combined_coords, max_sep * Unit('arcsec')
         )
         mask = (idx1 < idx2) & (
-            np.array([bands_map[i] != bands_map[j] for i, j in zip(idx1, idx2)])
+            np.array([bands_map[i] != bands_map[j] for i, j in zip(idx1, idx2, strict=False)])
         )
         idx1, idx2 = idx1[mask], idx2[mask]
         parent = list(range(len(combined_coords)))
@@ -670,7 +672,7 @@ def match_coordinates_across_bands(
             pu, pv = find(u), find(v)
             parent[pv] = pu if pu != pv else pv
 
-        for i, j in zip(idx1, idx2):
+        for i, j in zip(idx1, idx2, strict=False):
             union(i, j)
         for idx in range(len(combined_coords)):
             initial_groups[find(idx)].add(idx)
@@ -779,7 +781,7 @@ def match_coordinates_across_bands(
                     continue
                 # Select closest member per band
                 current_refined_indices = set()
-                for band, member_indices in members_by_band.items():
+                for _, member_indices in members_by_band.items():
                     if len(member_indices) == 1:
                         current_refined_indices.add(member_indices[0])
                     else:
@@ -867,7 +869,7 @@ def match_coordinates_across_bands(
             band_orig_indices[band] = orig_idx
 
         # --- 6. Build Output Row ---
-        row = {col: np.nan for col in columns}
+        row = dict.fromkeys(columns, np.nan)
         row['ra'] = final_coord_from_primary.ra.deg  # type: ignore
         row['dec'] = final_coord_from_primary.dec.deg  # type: ignore
 
