@@ -14,6 +14,11 @@ from astropy.io import fits
 from astropy.io.fits import Header
 from astropy.stats import SigmaClip, gaussian_fwhm_to_sigma, sigma_clipped_stats
 from astropy.wcs import WCS
+from photutils.background import Background2D, MedianBackground
+from PIL import Image, ImageDraw
+from scipy import ndimage
+from scipy.ndimage import binary_dilation, label
+
 from dwarforge.detection_utils import detect_anomaly, source_detection_with_dynamic_limit
 from dwarforge.utils import (
     delete_file,
@@ -28,10 +33,6 @@ from dwarforge.utils import (
     query_gaia_stars,
     tile_str,
 )
-from photutils.background import Background2D, MedianBackground
-from PIL import Image, ImageDraw
-from scipy import ndimage
-from scipy.ndimage import binary_dilation, label
 
 logger = logging.getLogger(__name__)
 
@@ -159,13 +160,13 @@ def replace_with_local_background(
         # Remove diffraction spike areas
         spike_mask = np.zeros(shape, dtype=np.uint8)
         cv2.drawMarker(
-            spike_mask,
+            spike_mask,  # type: ignore
             (x, y),
-            color=255,  # type: ignore
+            color=255,
             markerType=cv2.MARKER_CROSS,
             markerSize=spike_len,
             thickness=spike_thick,
-        )  # type: ignore
+        )
         mask[spike_mask > 0] = 0
 
         return mask
@@ -215,13 +216,13 @@ def replace_with_local_background(
         # Diffraction spikes are masked in any case if present
         if spike_len > 0:
             cv2.drawMarker(
-                star_region,
+                star_region,  # type: ignore
                 (local_x, local_y),
-                color=255,  # type: ignore
+                color=255,
                 markerType=cv2.MARKER_CROSS,
                 markerSize=spike_len,
                 thickness=spike_thick,
-            )  # type: ignore
+            )
 
         return star_region, bg_segments
 
@@ -278,19 +279,19 @@ def replace_with_local_background(
             star_region_reduced,
             (local_x, local_y),
             r_reduced,
-            255,  # type: ignore
+            255,
             -1,
-            lineType=cv2.LINE_AA,  # type: ignore
-        )  # type: ignore
+            lineType=cv2.LINE_AA,
+        )
         if spike_len > 0:
             cv2.drawMarker(
-                star_region_reduced,
+                star_region_reduced,  # type: ignore
                 (local_x, local_y),
-                color=255,  # type: ignore
+                color=255,
                 markerType=cv2.MARKER_CROSS,
                 markerSize=l_reduced,
                 thickness=spike_thick,
-            )  # type: ignore
+            )
 
         inner_r_bg = r_reduced
         outer_r_bg = r_reduced + 3
@@ -469,13 +470,13 @@ def replace_with_local_background(
                 star_region = binary_dilation(star_region, iterations=1).astype(np.uint8)
                 if spike_len > 0:
                     cv2.drawMarker(
-                        star_region,
+                        star_region,  # type: ignore
                         (local_x, local_y),
-                        color=255,  # type: ignore
+                        color=255,
                         markerType=cv2.MARKER_CROSS,
                         markerSize=spike_len,
                         thickness=spike_thick,
-                    )  # type: ignore
+                    )
                 bg_segments = np.zeros_like(star_region)
             elif star_case == 'embedded':
                 star_region, bg_segments = process_embedded(
@@ -720,13 +721,13 @@ def mask_stars(
         spike_thick = round(star.diffs_thick_fit * 5.0)
 
         cv2.drawMarker(
-            bright_star_mask,
+            bright_star_mask,  # type: ignore
             (x, y),
-            color=255,  # type: ignore
+            color=255,
             markerType=cv2.MARKER_CROSS,
             markerSize=round(0.8 * spike_len),
             thickness=round(0.9 * spike_thick),
-        )  # type: ignore
+        )
 
     data, replaced_star_mask, visualization_mask, star_case_df, vis_mask_border = (
         replace_with_local_background(

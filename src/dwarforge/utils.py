@@ -7,6 +7,7 @@ import time
 from collections import Counter
 from itertools import combinations
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,7 @@ import sep
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
-from astropy.io.fits import Header
+from astropy.io.fits import Header, ImageHDU, PrimaryHDU
 from astropy.stats import SigmaClip
 from astropy.wcs import WCS
 from astroquery.gaia import Gaia
@@ -516,16 +517,23 @@ def check_objects_in_neighboring_tiles(tile, dwarfs_df, header):
 
 
 def get_dwarf_tile_list(dwarf_cat: Path, in_dict: dict, bands: list[str]) -> list[tuple[int, int]]:
+    """Get unique dwarf tiles for specified bands.
+
+    Raises:
+        ValueError: If bands cannot be processed or tiles cannot be parsed
+    """
     try:
         bands = [in_dict[band]['band'] for band in bands]
         dwarf_cat_filtered = get_df_for_bands(dwarf_cat, bands)
         dwarf_tiles_for_bands = dwarf_cat_filtered['tile'].values
     except Exception as e:
-        print(f'Error getting known dwarf tiles in r: {e}')
+        raise ValueError(f'Error getting known dwarf tiles: {e}') from e
+
     try:
         str_to_tuple = [ast.literal_eval(item) for item in dwarf_tiles_for_bands]
     except Exception as e:
-        print(f'Error in str_to_tuple: {e}')
+        raise ValueError(f'Error parsing tile coordinates: {e}') from e
+
     unique_tiles = list(set(str_to_tuple))
     return unique_tiles
 
@@ -608,12 +616,8 @@ def check_corrupted_data(data, header, ra, dec, radius_arcsec=15.0):
 
 
 def generate_positive_trunc_normal(annulus_data, mean, std, size):
-    #     print(f'mean: {mean}, std: {std}')
-
     if len(annulus_data) != 0:
         lower, upper = np.percentile(annulus_data, 60), 10**5
-    #         print(f'percentile: {np.percentile(annulus_data, 60)}')
-    #         print(f'frac > 0: {np.sum(annulus_data > lower)/len(annulus_data)}')
     else:
         lower, upper = 0, 10**5
 
@@ -624,7 +628,7 @@ def generate_positive_trunc_normal(annulus_data, mean, std, size):
         # Calculate the standard truncated normal distribution's limits
         a, b = (lower - loc) / scale, (upper - loc) / scale
     except Exception as e:
-        print(f'Error: {e}')
+        raise ValueError(f'Error calculating truncation limits: {e}') from e
 
     # Generate values
     positive_values = truncnorm.rvs(a, b, loc=loc, scale=scale, size=size)
@@ -634,25 +638,30 @@ def generate_positive_trunc_normal(annulus_data, mean, std, size):
 def open_fits(file_path: Path, fits_ext: int) -> tuple[np.ndarray, Header]:
     """
     Open fits file and return data and header.
-
     Args:
         file_path: name of the fits file
         fits_ext: extension of the fits file
-
     Returns:
-        data (numpy.ndarray): image data
-        header (fits header): header of the fits file
+        data: image data
+        header: header of the fits file
     """
-    logger.debug(f'Opening fits file {os.path.basename(file_path)}..')
+    logger.debug(f'Opening fits file {file_path.name}..')
     start_opening = time.time()
-    with fits.open(file_path, memmap=True) as hdul:  # type: ignore
+
+    with fits.open(file_path, memmap=True) as hdul:
         if fits_ext > len(hdul) - 1:
             fits_ext = 0
-        data = hdul[fits_ext].data.astype(np.float32)  # type: ignore
-        header = hdul[fits_ext].header  # type: ignore
-    logger.debug(
-        f'Fits file {os.path.basename(file_path)} opened in {time.time() - start_opening:.2f} seconds.'
-    )
+
+        # Type assertion - tell the type checker this is an ImageHDU or PrimaryHDU
+        hdu = cast(ImageHDU | PrimaryHDU, hdul[fits_ext])
+
+        if hdu.data is None:
+            raise ValueError(f'HDU extension {fits_ext} contains no data')
+
+        data = hdu.data.astype(np.float32)
+        header = hdu.header
+
+    logger.debug(f'Fits file {file_path.name} opened in {time.time() - start_opening:.2f} seconds.')
     return data, header
 
 

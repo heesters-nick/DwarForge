@@ -80,13 +80,13 @@ def open_fits_files_in_ds9(file1_path, file2_path):
 
         # Run the DS9 command
         subprocess.run(cmd, check=True)
-        print(
+        logger.info(
             f'Successfully opened {os.path.basename(file1_path)} and {os.path.basename(file2_path)} in DS9.'
         )
     except subprocess.CalledProcessError:
-        print('Error: Failed to open the FITS files in DS9.')
+        logger.error('Error: Failed to open the FITS files in DS9.')
     except FileNotFoundError:
-        print('Error: DS9 is not installed or not in your system PATH.')
+        logger.error('Error: DS9 is not installed or not in your system PATH.')
 
 
 def _is_new_id(x: Any) -> bool:

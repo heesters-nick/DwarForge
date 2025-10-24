@@ -58,3 +58,11 @@ dev = ["pytest", "pytest-mock", "ruff", "mypy"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_any_generics = false
+files = ["src"]

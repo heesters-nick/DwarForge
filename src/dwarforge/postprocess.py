@@ -1,5 +1,4 @@
 import logging
-import os
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -11,7 +10,10 @@ import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord, concatenate, search_around_sky
 from astropy.io.fits import Header
+from astropy.units import Unit
 from astropy.wcs import WCS
+from numpy.typing import NDArray
+
 from dwarforge.utils import (
     check_corrupted_data,
     check_objects_in_neighboring_tiles,
@@ -28,28 +30,34 @@ logger = logging.getLogger(__name__)
 
 
 def match_stars(
-    df_det, df_label, segmap=None, max_sep=5.0, extended_flag_radius=None, mag_limit=14.0
-):
+    df_det: pd.DataFrame,
+    df_label: pd.DataFrame,
+    segmap: NDArray | None = None,
+    max_sep: float = 5.0,
+    extended_flag_radius: float | None = None,
+    mag_limit: float = 14.0,
+) -> tuple[NDArray, pd.DataFrame, pd.DataFrame, pd.DataFrame, NDArray | None, NDArray | None]:
     """
     Match detections to known objects, return matches, unmatches, and extended flag indices
     Args:
-        df_det (dataframe): detections dataframe
-        df_label (dataframe): dataframe of objects with labels
-        max_sep (float): maximum separation tolerance for direct matches
-        extended_flag_radius (float): radius to flag detections as potentially associated with stars
+        df_det: detections dataframe
+        df_label: dataframe of objects with labels
+        segmap: segmentation map
+        max_sep: maximum separation tolerance for direct matches
+        extended_flag_radius: radius to flag detections as potentially associated with stars
     Returns:
-        det_matching_idx (list): indices of detections for which labels are available
-        label_matches (dataframe): known objects that were detected
-        label_unmatches (dataframe): known objects that were not detected
-        det_matches (dataframe): detections that are known objects
-        extended_flag_idx (list): indices of all detections within extended_flag_radius of known stars
+        det_matching_idx: indices of detections for which labels are available
+        label_matches: known objects that were detected
+        label_unmatches: known objects that were not detected
+        det_matches: detections that are known objects
+        extended_flag_idx: indices of all detections within extended_flag_radius of known stars
     """
     c_det = SkyCoord(df_det['ra'], df_det['dec'], unit='deg')
     c_label = SkyCoord(df_label['ra'], df_label['dec'], unit='deg')
 
     # Find closest matches within max_sep
     idx, d2d, _ = c_label.match_to_catalog_3d(c_det)
-    sep_constraint = d2d < max_sep * u.arcsec  # type: ignore
+    sep_constraint = d2d < max_sep * Unit('arcsec')
     det_matching_idx = idx[sep_constraint]
 
     label_matches = df_label[sep_constraint].reset_index(drop=True)
@@ -57,33 +65,40 @@ def match_stars(
     det_matches = df_det.loc[det_matching_idx].reset_index(drop=True)
 
     extended_flag_idx, extended_flag_mags = None, None
-    if extended_flag_radius is not None:
+    if extended_flag_radius is not None and segmap is not None:
         bright_stars = df_label[df_label['Gmag'] < mag_limit].reset_index(drop=True)
 
         # Create a mask for all bright stars at once using cv2.circle
-        h, w = segmap.shape  # type: ignore
+        h, w = segmap.shape
         all_stars_mask = np.zeros((h, w), dtype=np.uint8)
         for x, y in bright_stars[['x', 'y']].values:
             x, y = round(x), round(y)
+            extended_flag_radius = round(extended_flag_radius)
             if 0 <= x < w and 0 <= y < h:
-                cv2.circle(all_stars_mask, (x, y), round(extended_flag_radius), 1, -1)  # type: ignore
+                cv2.circle(
+                    all_stars_mask,
+                    center=(x, y),
+                    radius=extended_flag_radius,
+                    color=255,
+                    thickness=-1,
+                )
 
         # Find all segment IDs within the masked area
-        segment_ids = np.unique(segmap[all_stars_mask > 0])[1:]  # type: ignore # exclude 0 (background)
+        segment_ids = np.unique(segmap[all_stars_mask > 0])[1:]  # exclude 0 (background)
 
         extended_flag_idx = (
             segment_ids - 1
         )  # Subtract 1 because SEP IDs start at 1, but DataFrame index starts at 0
 
         # Find the closest bright star for each flagged segment
-        flagged_segments_centers = df_det.loc[extended_flag_idx, ['xpeak', 'ypeak']].values
-        bright_stars_coords = bright_stars[['x', 'y']].values
+        flagged_segments_centers = df_det.loc[extended_flag_idx, ['xpeak', 'ypeak']].to_numpy()
+        bright_stars_coords = bright_stars[['x', 'y']].to_numpy()
         distances = np.sqrt(
             np.sum((flagged_segments_centers[:, np.newaxis] - bright_stars_coords) ** 2, axis=2)
         )
-        closest_star_indices = np.argmin(distances, axis=1)
+        closest_star_indices = np.asarray(np.argmin(distances, axis=1), dtype=int)
 
-        extended_flag_mags = bright_stars.loc[closest_star_indices, 'Gmag'].values
+        extended_flag_mags = bright_stars['Gmag'].to_numpy()[closest_star_indices]
 
     return (
         det_matching_idx,
@@ -420,6 +435,8 @@ def make_cutouts(
         xs, ys = wcs.all_world2pix(ra, dec, 0)
         xs, ys = np.floor(xs + 0.5).astype(np.int32), np.floor(ys + 0.5).astype(np.int32)
         object_ids = np.zeros(len(xs))
+    else:
+        raise ValueError('Either df or ra and dec must be provided.')
 
     cutout_start = time.time()
     cutouts, cutouts_seg = create_segmented_cutouts(
@@ -430,16 +447,12 @@ def make_cutouts(
     return cutouts, cutouts_seg
 
 
-def load_segmap(file_path):
-    path, extension = os.path.splitext(file_path)
-    directory = os.path.dirname(file_path)
-    try:
-        seg_file = [f for f in os.listdir(directory) if f.endswith('_seg.fits')][0]
-        seg_path = os.path.join(directory, seg_file)
-    except Exception as e:
-        print(f'Error finding segmentation map: {e}')
-        mto_seg = None
-    mto_seg, header_seg = open_fits(seg_path, fits_ext=0)
+def load_segmap(file_path: Path) -> np.ndarray:
+    """Load MTO segmentation map corresponding to the given fits file path."""
+    seg_path = next(file_path.parent.glob('*_seg.fits'), None)
+    if seg_path is None:
+        raise FileNotFoundError(f'No segmentation map found for {file_path.stem}')
+    mto_seg, _ = open_fits(seg_path, fits_ext=0)
 
     return mto_seg
 
@@ -534,378 +547,6 @@ def match_coordinates(band1, band2, band_data, max_sep=15.0):
     idx, d2d, _ = reference_coords.match_to_catalog_3d(target_coords)
     mask = d2d < max_sep * u.arcsec  # type: ignore
     return np.where(mask)[0], idx[mask]
-
-
-# def match_coordinates_across_bands(
-#     band_data: dict, max_sep: float = 10.0, band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i']
-# ) -> pd.DataFrame:
-#     """
-#     Cross-match detections across bands and merge photometric properties.
-#     Handles cases where bands may be missing or empty.
-
-#     Args:
-#         band_data: Dictionary containing data for each band
-#         max_sep: Maximum separation in arcseconds for matching
-#         band_priority: List of bands in order of priority for coordinate selection
-
-#     Returns:
-#         DataFrame with matches present in at least 2 bands, or empty DataFrame if insufficient data
-#     """
-#     # Define column structure upfront
-#     band_specific_cols = [
-#         'ID',
-#         'X',
-#         'Y',
-#         'A',
-#         'B',
-#         'theta',
-#         'total_flux',
-#         'mu_max',
-#         'mu_median',
-#         'mu_mean',
-#         'R_fwhm',
-#         'R_e',
-#         'R10',
-#         'R25',
-#         'R75',
-#         'R90',
-#         'R100',
-#         'n_pix',
-#         'ra',
-#         'dec',
-#         're_arcsec',
-#         'r_fwhm_arcsec',
-#         'r_10_arcsec',
-#         'r_25_arcsec',
-#         'r_75_arcsec',
-#         'r_90_arcsec',
-#         'r_100_arcsec',
-#         'A_arcsec',
-#         'B_arcsec',
-#         'axis_ratio',
-#         'mag',
-#         'mu',
-#     ]
-#     common_cols = ['class_label', 'zspec', 'lsb', 'ID_known']
-#     columns = ['ra', 'dec'] + common_cols
-#     for band in band_priority:
-#         columns.extend(f'{col}_{band}' for col in band_specific_cols)
-
-#     # Collect valid bands and their data
-#     valid_bands = []
-#     all_coords = []
-#     bands_list = []
-#     orig_indices = []
-#     dfs = []
-
-#     for band in band_priority:
-#         # Skip if band is missing or empty
-#         if (
-#             band not in band_data
-#             or band_data[band] is None
-#             or 'ra' not in band_data[band]
-#             or 'dec' not in band_data[band]
-#             or len(band_data[band]['ra']) == 0
-#         ):
-#             continue
-
-#         data = band_data[band]
-#         coords = SkyCoord(ra=data['ra'] * u.deg, dec=data['dec'] * u.deg)
-
-#         valid_bands.append(band)
-#         all_coords.append(coords)
-#         bands_list.extend([band] * len(coords))
-#         orig_indices.append(np.arange(len(coords)))
-#         dfs.append(data['df'])
-
-#     # Return empty DataFrame if we don't have at least 2 valid bands
-#     if len(valid_bands) < 2:
-#         return pd.DataFrame(columns=['unique_id'] + columns)
-
-#     # Combine coordinates and find matches
-#     combined_coords = concatenate(all_coords)
-#     idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)
-
-#     # Filter matches to only include different bands
-#     mask = (idx1 < idx2) & (np.array([bands_list[i] != bands_list[j] for i, j in zip(idx1, idx2)]))
-#     idx1, idx2 = idx1[mask], idx2[mask]
-
-#     # Union-Find for grouping
-#     parent = list(range(len(combined_coords)))
-
-#     def find(u):
-#         while parent[u] != u:
-#             parent[u] = parent[parent[u]]
-#             u = parent[u]
-#         return u
-
-#     def union(u, v):
-#         pu, pv = find(u), find(v)
-#         if pu != pv:
-#             parent[pv] = pu
-
-#     # Group matching detections
-#     for i, j in zip(idx1, idx2):
-#         union(i, j)
-
-#     # Collect groups and their members
-#     groups = {}
-#     for idx in range(len(combined_coords)):
-#         root = find(idx)
-#         if root not in groups:
-#             groups[root] = set()
-#         groups[root].add(idx)
-
-#     # Build output DataFrame
-#     rows = []
-#     for group in groups.values():
-#         # Only keep groups with matches in at least 2 bands
-#         group_bands = {bands_list[idx] for idx in group}
-#         if len(group_bands) < 2:
-#             continue
-
-#         # Select primary band coordinates based on priority
-#         primary_band = next((b for b in band_priority if b in group_bands), None)
-#         primary_idx = next(idx for idx in group if bands_list[idx] == primary_band)
-#         primary_coord = combined_coords[primary_idx]
-
-#         # Map indices back to original dataframes
-#         band_indices = {}
-#         for idx in group:
-#             band = bands_list[idx]
-#             band_idx = valid_bands.index(band)
-#             offset = sum(len(c) for c in all_coords[:band_idx])
-#             orig_idx = orig_indices[band_idx][idx - offset]
-#             band_indices[band] = orig_idx
-
-#         # Create row with NaN defaults
-#         row = {col: np.nan for col in columns}
-#         row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})  # type: ignore
-
-#         # Fill common columns from primary band
-#         primary_df = dfs[valid_bands.index(primary_band)].iloc[band_indices[primary_band]]
-#         for col in common_cols:
-#             if col in primary_df:
-#                 row[col] = primary_df[col]
-
-#         # Fill band-specific columns
-#         for band in group_bands:
-#             df = dfs[valid_bands.index(band)].iloc[band_indices[band]]
-#             for col in band_specific_cols:
-#                 col_name = f'{col}_{band}'
-#                 if col in df:
-#                     row[col_name] = df[col]
-
-#         rows.append(row)
-
-#     # Create final DataFrame
-#     if rows:
-#         result_df = pd.DataFrame(rows, columns=columns)
-#     else:
-#         result_df = pd.DataFrame(columns=columns)
-
-#     # Add unique IDs
-#     result_df.insert(0, 'unique_id', np.arange(len(result_df)))
-
-#     return result_df
-
-
-# def match_coordinates_across_bands_keep_lsb(
-#     band_data: dict, max_sep: float = 10.0, band_priority: list = ['cfis_lsb-r', 'whigs-g', 'ps-i']
-# ) -> pd.DataFrame:
-#     """
-#     Cross-match detections across bands and merge photometric properties.
-#     Handles cases where bands may be missing or empty.
-#     Special handling for known dwarfs or LSB objects: these will be kept even if only detected in one band.
-
-#     Args:
-#         band_data: Dictionary containing data for each band
-#         max_sep: Maximum separation in arcseconds for matching
-#         band_priority: List of bands in order of priority for coordinate selection
-
-#     Returns:
-#         DataFrame with matches present in at least 2 bands (or known dwarfs in 1 band),
-#         or empty DataFrame if insufficient data
-#     """
-#     # Define column structure upfront
-#     band_specific_cols = [
-#         'ID',
-#         'X',
-#         'Y',
-#         'A',
-#         'B',
-#         'theta',
-#         'total_flux',
-#         'mu_max',
-#         'mu_median',
-#         'mu_mean',
-#         'R_fwhm',
-#         'R_e',
-#         'R10',
-#         'R25',
-#         'R75',
-#         'R90',
-#         'R100',
-#         'n_pix',
-#         'ra',
-#         'dec',
-#         're_arcsec',
-#         'r_fwhm_arcsec',
-#         'r_10_arcsec',
-#         'r_25_arcsec',
-#         'r_75_arcsec',
-#         'r_90_arcsec',
-#         'r_100_arcsec',
-#         'A_arcsec',
-#         'B_arcsec',
-#         'axis_ratio',
-#         'mag',
-#         'mu',
-#     ]
-#     common_cols = ['class_label', 'zspec', 'lsb', 'ID_known']
-#     columns = ['ra', 'dec'] + common_cols
-#     for band in band_priority:
-#         columns.extend(f'{col}_{band}' for col in band_specific_cols)
-
-#     # Collect valid bands and their data
-#     valid_bands = []
-#     all_coords = []
-#     bands_list = []
-#     orig_indices = []
-#     dfs = []
-
-#     for band in band_priority:
-#         # Skip if band is missing or empty
-#         if (
-#             band not in band_data
-#             or band_data[band] is None
-#             or 'ra' not in band_data[band]
-#             or 'dec' not in band_data[band]
-#             or len(band_data[band]['ra']) == 0
-#         ):
-#             continue
-
-#         data = band_data[band]
-#         coords = SkyCoord(ra=data['ra'] * u.deg, dec=data['dec'] * u.deg)
-
-#         valid_bands.append(band)
-#         all_coords.append(coords)
-#         bands_list.extend([band] * len(coords))
-#         orig_indices.append(np.arange(len(coords)))
-#         dfs.append(data['df'])
-
-#     # Return empty DataFrame if we don't have at least 2 valid bands
-#     if len(valid_bands) < 2:
-#         return pd.DataFrame(columns=['unique_id'] + columns)
-
-#     # Combine coordinates and find matches
-#     combined_coords = concatenate(all_coords)
-#     idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)
-
-#     # Filter matches to only include different bands
-#     mask = (idx1 < idx2) & (np.array([bands_list[i] != bands_list[j] for i, j in zip(idx1, idx2)]))
-#     idx1, idx2 = idx1[mask], idx2[mask]
-
-#     # Union-Find for grouping
-#     parent = list(range(len(combined_coords)))
-
-#     def find(u):
-#         while parent[u] != u:
-#             parent[u] = parent[parent[u]]
-#             u = parent[u]
-#         return u
-
-#     def union(u, v):
-#         pu, pv = find(u), find(v)
-#         if pu != pv:
-#             parent[pv] = pu
-
-#     # Group matching detections
-#     for i, j in zip(idx1, idx2):
-#         union(i, j)
-
-#     # Collect groups and their members
-#     groups = {}
-#     for idx in range(len(combined_coords)):
-#         root = find(idx)
-#         if root not in groups:
-#             groups[root] = set()
-#         groups[root].add(idx)
-
-#     # Build output DataFrame
-#     rows = []
-#     for group in groups.values():
-#         # Check if this group has matches in at least 2 bands
-#         group_bands = {bands_list[idx] for idx in group}
-
-#         # MODIFIED: Special handling for single-band groups that might be known dwarfs
-#         if len(group_bands) < 2:
-#             # Check if any object in this group meets exception criteria (lsb=1 or ID_known is not NaN)
-#             should_keep = False
-
-#             for idx in group:
-#                 # Get band and original index for this object
-#                 band = bands_list[idx]
-#                 band_idx = valid_bands.index(band)
-#                 offset = sum(len(c) for c in all_coords[:band_idx])
-#                 orig_idx = orig_indices[band_idx][idx - offset]
-#                 df_row = dfs[band_idx].iloc[orig_idx]
-
-#                 # Check if this is a known dwarf or LSB object
-#                 if ('lsb' in df_row and df_row['lsb'] == 1) or (
-#                     'ID_known' in df_row and pd.notna(df_row['ID_known'])
-#                 ):
-#                     should_keep = True
-#                     break
-
-#             # Skip this group if no known dwarfs or LSB objects
-#             if not should_keep:
-#                 continue
-
-#         # Select primary band coordinates based on priority
-#         primary_band = next((b for b in band_priority if b in group_bands), None)
-#         primary_idx = next(idx for idx in group if bands_list[idx] == primary_band)
-#         primary_coord = combined_coords[primary_idx]
-
-#         # Map indices back to original dataframes
-#         band_indices = {}
-#         for idx in group:
-#             band = bands_list[idx]
-#             band_idx = valid_bands.index(band)
-#             offset = sum(len(c) for c in all_coords[:band_idx])
-#             orig_idx = orig_indices[band_idx][idx - offset]
-#             band_indices[band] = orig_idx
-
-#         # Create row with NaN defaults
-#         row = {col: np.nan for col in columns}
-#         row.update({'ra': primary_coord.ra.deg, 'dec': primary_coord.dec.deg})  # type: ignore
-
-#         # Fill common columns from primary band
-#         primary_df = dfs[valid_bands.index(primary_band)].iloc[band_indices[primary_band]]
-#         for col in common_cols:
-#             if col in primary_df:
-#                 row[col] = primary_df[col]
-
-#         # Fill band-specific columns
-#         for band in group_bands:
-#             df = dfs[valid_bands.index(band)].iloc[band_indices[band]]
-#             for col in band_specific_cols:
-#                 col_name = f'{col}_{band}'
-#                 if col in df:
-#                     row[col_name] = df[col]
-
-#         rows.append(row)
-
-#     # Create final DataFrame
-#     if rows:
-#         result_df = pd.DataFrame(rows, columns=columns)
-#     else:
-#         result_df = pd.DataFrame(columns=columns)
-
-#     # Add unique IDs
-#     result_df.insert(0, 'unique_id', np.arange(len(result_df)))
-
-#     return result_df
 
 
 def match_coordinates_across_bands(
@@ -1010,7 +651,9 @@ def match_coordinates_across_bands(
     initial_groups = defaultdict(set)
     if len(valid_bands) >= 2:
         combined_coords = concatenate(all_coords_list)
-        idx1, idx2, _, _ = search_around_sky(combined_coords, combined_coords, max_sep * u.arcsec)  # type: ignore
+        idx1, idx2, _, _ = search_around_sky(
+            combined_coords, combined_coords, max_sep * Unit('arcsec')
+        )
         mask = (idx1 < idx2) & (
             np.array([bands_map[i] != bands_map[j] for i, j in zip(idx1, idx2)])
         )
@@ -1128,7 +771,7 @@ def match_coordinates_across_bands(
 
             if has_conflict:
                 try:  # Select center calculation method
-                    group_center = get_coord_median(group_coords)
+                    group_center = get_coord_median(group_coords)  # type: ignore
                 except Exception as e:
                     logger.error(
                         f'  Warning: Could not calculate center for group {group_counter}. Skipping. Error: {e}'
@@ -1373,6 +1016,8 @@ def read_band_data(
         seg_matches = list(data_path.parent.glob(f'{data_path.stem}*_seg.fits'))
         if seg_matches:
             segmap, _ = open_fits(seg_matches[0], fits_ext=0)
+        else:
+            segmap = None
     else:
         segmap = None
 
@@ -1406,6 +1051,8 @@ def filter_candidates(df: pd.DataFrame, tile: tuple[int, int], band: str) -> pd.
     df_mod = df.copy()
     if 'lsb' in df.columns:
         df_dwarf = df.loc[df['lsb'] == 1].reset_index(drop=True)
+    else:
+        df_dwarf = pd.DataFrame(columns=df.columns)
 
     # Define band-specific conditions
     band_conditions = {
