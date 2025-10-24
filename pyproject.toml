@@ -1,6 +1,7 @@
+# ---- Build system requirements ----
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 # ---- Project metadata & dependencies ----
 [project]
@@ -52,9 +53,8 @@ dependencies = [
 
 # Optional dependency groups for dev tooling, tests, docs, etc.
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "black"]
+dev = ["pytest", "pytest-mock", "ruff", "mypy"]
 
-# ---- Tell setuptools where to find your packages (src/ layout) ----
-[tool.setuptools.packages.find]
-where = ["src"]
-namespaces = true
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

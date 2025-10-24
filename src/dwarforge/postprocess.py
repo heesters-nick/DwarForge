@@ -1128,7 +1128,7 @@ def match_coordinates_across_bands(
 
             if has_conflict:
                 try:  # Select center calculation method
-                    group_center = get_coord_median(group_coords)  # type: ignore
+                    group_center = get_coord_median(group_coords)
                 except Exception as e:
                     logger.error(
                         f'  Warning: Could not calculate center for group {group_counter}. Skipping. Error: {e}'
