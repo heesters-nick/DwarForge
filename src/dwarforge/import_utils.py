@@ -86,7 +86,7 @@ def import_dataframe(
     ra_key: str,
     dec_key: str,
     id_key: str,
-) -> tuple[pd.DataFrame | None, SkyCoord | None]:
+) -> tuple[pd.DataFrame, SkyCoord | None]:
     """
     Process a DataFrame provided in the config file.
 
@@ -112,7 +112,7 @@ def import_dataframe(
             'for right ascention, declination and object ID \n'
             'if they are not equal to the default keys: ra, dec, ID.'
         )
-        return None, None
+        return pd.DataFrame(), None
 
     coord_c = SkyCoord(
         catalog[ra_key].to_numpy(), catalog[dec_key].to_numpy(), unit='deg', frame='icrs'
@@ -151,7 +151,7 @@ def input_to_tile_list(
     ra_key_default: str = 'ra',
     dec_key_default: str = 'dec',
     id_key_default: str = 'ID',
-) -> tuple[list[tuple[int, int]] | None, list[tuple[int, int]] | None, pd.DataFrame | None]:
+) -> tuple[list[tuple[int, int]] | None, list[tuple[int, int]] | None, pd.DataFrame]:
     """
     Process the input to get a list of tiles that are available in r and at least two other bands.
 
@@ -181,12 +181,12 @@ def input_to_tile_list(
             inputs.dataframe.columns.id,
         )
     elif source == 'tiles':
-        return None, import_tiles(inputs.tiles, availability, band_constr), None
+        return None, import_tiles(inputs.tiles, availability, band_constr), pd.DataFrame()
     else:
         logging.info(
             'No coordinates, DataFrame or tiles provided. Processing all available tiles..'
         )
-        return None, None, None
+        return None, None, pd.DataFrame()
 
     unique_tiles, tiles_x_bands, catalog = tile_finder(
         availability, catalog, coord_c, tile_info_dir, band_constr

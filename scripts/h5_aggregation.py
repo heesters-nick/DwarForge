@@ -201,13 +201,7 @@ def combine_h5_files():
 
     # Save any remaining data
     if object_counter > 0:
-        try:
-            with h5py.File(input_file, 'r') as f:
-                band_names = np.array(f['band_names'])
-        except Exception as e:
-            logger.error(f'Error reading band names from last file: {e}')
-            band_names = np.array(bands_to_combine, dtype=STR_DT)
-
+        band_names = np.array(bands_to_combine, dtype=STR_DT)
         save_combined_file(
             combined_data, aggregation_dir, out_file_prefix, file_counter, band_names
         )

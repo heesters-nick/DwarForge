@@ -409,7 +409,7 @@ def process_objects_with_model(
 
     # Initialize data collection
     latent_vectors: list[np.ndarray] = []
-    metadata = {
+    metadata: dict[str, list[np.ndarray]] = {
         'unique_id': [],
         'ra': [],
         'dec': [],
@@ -425,7 +425,7 @@ def process_objects_with_model(
 
     # Accumulation buffers
     accumulated_images: list[np.ndarray] = []
-    accumulated_metadata = {
+    accumulated_metadata: dict[str, list[np.ndarray]] = {
         key: [] for key in metadata.keys()
     }  # Lists to hold batches before inference
 
@@ -545,15 +545,15 @@ def process_objects_with_model(
 
                 # 12. Add SORTED metadata to accumulation buffer
                 accumulated_metadata['unique_id'].append(
-                    valid_catalog_objects_sorted['unique_id'].values
+                    valid_catalog_objects_sorted['unique_id'].to_numpy()
                 )
-                accumulated_metadata['ra'].append(valid_catalog_objects_sorted['ra'].values)
-                accumulated_metadata['dec'].append(valid_catalog_objects_sorted['dec'].values)
+                accumulated_metadata['ra'].append(valid_catalog_objects_sorted['ra'].to_numpy())
+                accumulated_metadata['dec'].append(valid_catalog_objects_sorted['dec'].to_numpy())
                 accumulated_metadata['tile'].append(
                     np.full(n_valid, tile)
                 )  # Use the actual tile variable
-                accumulated_metadata['z'].append(valid_catalog_objects_sorted['z'].values)
-                accumulated_metadata['zerr'].append(valid_catalog_objects_sorted['zerr'].values)
+                accumulated_metadata['z'].append(valid_catalog_objects_sorted['z'].to_numpy())
+                accumulated_metadata['zerr'].append(valid_catalog_objects_sorted['zerr'].to_numpy())
 
                 # 13. Calculate total accumulated images
                 total_accumulated = sum(arr.shape[0] for arr in accumulated_images)
@@ -578,7 +578,9 @@ def process_objects_with_model(
                         latent_vectors.append(batch_vectors)  # Add results batch
 
                         # Process metadata for these images (Potential inefficiency here)
-                        remaining_metadata = {key: [] for key in metadata.keys()}
+                        remaining_metadata: dict[str, list[np.ndarray]] = {
+                            key: [] for key in metadata.keys()
+                        }
                         processed_count_in_batch = (
                             0  # Track how much metadata corresponds to inference_images
                         )
@@ -680,13 +682,13 @@ def process_objects_with_model(
             all_metadata[key] = np.concatenate(metadata[key])
         else:  # Create empty array of appropriate type if nothing was processed
             if key == 'unique_id':
-                dtype = np.int64
+                dtype = np.int64  # type: ignore[assignment]
             elif key in ['ra', 'dec', 'z', 'zerr']:
-                dtype = np.float64
+                dtype = np.float64  # type: ignore[assignment]
             elif key == 'tile':
-                dtype = object  # Or infer from catalog dtype
+                dtype = object  # type: ignore[assignment]  # Or infer from catalog dtype
             else:
-                dtype = object
+                dtype = object  # type: ignore[assignment]
             all_metadata[key] = np.array([], dtype=dtype)
 
     # Check consistency (optional)

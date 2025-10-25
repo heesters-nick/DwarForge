@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -330,7 +330,7 @@ def load_settings(
 
 def settings_to_jsonable(cfg: Settings) -> dict[str, Any]:
     # Pydantic v2: turn Paths into strings etc.
-    return cast(dict[str, Any], cfg.model_dump(mode='json'))
+    return cfg.model_dump(mode='json')
 
 
 def ensure_runtime_dirs(cfg: Settings) -> None:

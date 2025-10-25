@@ -263,9 +263,9 @@ def process_tile(
     lsb_file_path: Path,
     file_lock: LockT | None,
 ):
+    num_objects = 0
     try:
         logger.info(f'Matching and combining detections in tile {tile_str(tile)}')
-        num_objects = 0
         tile_dir = Path(f'{str(tile[0]).zfill(3)}_{str(tile[1]).zfill(3)}')
         if use_full_res:
             output_file = f'{tile_dir}_matched_cutouts_full_res_final.h5'
@@ -382,11 +382,12 @@ def process_tile(
             k = min(n_neighbors + 1, total_points)
             # Find nearest neighbors for LSB objects
             tree = cKDTree(cartesian)  # type: ignore
+
             _, neighbor_indices = tree.query(cartesian[lsb_indices], k=k)  # type: ignore
 
             # Create mask for neighbor labels
             neighbor_mask = np.zeros_like(labels, dtype=bool)
-            for idx_list in neighbor_indices:
+            for idx_list in neighbor_indices:  # type: ignore
                 neighbor_mask[idx_list[1:]] = True  # Skip first index (the LSB object itself)
             # Remove LSB objects from neighbors
             neighbor_mask = neighbor_mask & ~lsb_mask
@@ -663,6 +664,16 @@ def process_worker(
 
 
 def main() -> None:
+    # Initialize variables used in cleanup
+    shutdown_flag = None
+    all_downloads_complete = None
+    download_queue = None
+    process_queue = None
+    download_threads = []
+    processes = []
+    num_download_threads = 0
+    use_full_res = False
+
     try:
         cfg = load_settings('configs/combination_config.yaml')
         # remove previous run's database and logs if resume = false
@@ -931,26 +942,43 @@ def main() -> None:
     except Exception as e:
         logger.error(f'An error occurred in the main process: {str(e)}')
     finally:
-        if use_full_res:
-            # Cleanup for full resolution mode
+        # Cleanup
+        if use_full_res and shutdown_flag is not None:
+            logger.info('Initiating cleanup...')
+
+            # Signal shutdown
             shutdown_flag.set()
-            all_downloads_complete.set()
+            if all_downloads_complete is not None:
+                all_downloads_complete.set()
 
             # Clean up download threads
-            for _ in range(num_download_threads):
-                download_queue.put((None, None))
+            if download_queue is not None:
+                for _ in range(num_download_threads):
+                    try:
+                        download_queue.put((None, None))
+                    except Exception:
+                        pass
+
             for t in download_threads:
-                t.join(timeout=10)
+                try:
+                    t.join(timeout=10)
+                except Exception as e:
+                    logger.warning(f'Error joining download thread: {e}')
 
             # Clean up processing workers
             for p in processes:
-                p.join(timeout=10)
-                if p.is_alive():
-                    logger.warning(
-                        f'Process {p.pid} did not terminate gracefully. Forcing termination.'
-                    )
-                    p.terminate()
-                    p.join()
+                try:
+                    p.join(timeout=10)
+                    if p.is_alive():
+                        logger.warning(
+                            f'Process {p.pid} did not terminate gracefully. Forcing termination.'
+                        )
+                        p.terminate()
+                        p.join()
+                except Exception as e:
+                    logger.warning(f'Error cleaning up process: {e}')
+
+            logger.info('Cleanup complete.')
 
 
 if __name__ == '__main__':

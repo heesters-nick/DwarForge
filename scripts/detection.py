@@ -206,6 +206,14 @@ def process_tile_for_band(
         not (all_downloads_complete.is_set() and process_queue.empty())
         and not shutdown_flag.is_set()
     ):
+        # Intialize cleanup variables
+        final_path: Path | None = None
+        param_path: Path | None = None
+        seg_path: Path | None = None
+        prepped_path: Path | None = None
+        tile: tuple[int, int] | None = None
+        band: str | None = None
+
         try:
             tile, band, final_path, final_path_binned, fits_ext, zp = process_queue.get(
                 timeout=120
@@ -213,6 +221,14 @@ def process_tile_for_band(
             if tile is None:  # Sentinel value
                 logger.info('Received sentinel, exiting.')
                 break
+
+            # Sanity checks
+            assert band is not None
+            assert final_path is not None
+            assert final_path_binned is not None
+            assert fits_ext is not None
+            assert zp is not None
+
         except queue.Empty:
             if all_downloads_complete.is_set() and process_queue.empty():
                 logger.info('Found empty queue and all downloads complete, exiting.')
@@ -247,12 +263,16 @@ def process_tile_for_band(
                     f'Skipped tile {tile_str(tile)}, band {band} as it contains mostly zeros.'
                 )
                 tile_info['detection_count'] = 0
-                param_path, seg_path, prepped_path = None, None, None
                 delete_file(final_path)
             else:
                 # Preprocess
                 binned_data, prepped_data, prepped_path, prepped_header = prep_tile(
-                    tile, final_path, final_path_binned, fits_ext, zp, band, bin_size=4
+                    tile=tile,
+                    file_path=final_path,
+                    file_path_binned=final_path_binned,
+                    fits_ext=fits_ext,
+                    zp=zp,
+                    band=band,
                 )
 
                 # Run detection
@@ -357,22 +377,18 @@ def process_tile_for_band(
                 f'Detections: {tile_info["detection_count"]}.'
             )
 
-            if 'final_path' in locals() and final_path is not None and os.path.isfile(final_path):
-                # delete raw data
+            if final_path is not None and os.path.isfile(final_path):
                 delete_file(final_path)
-            if 'param_path' in locals() and param_path is not None and os.path.isfile(param_path):
-                # delete full MTO parameter file
+
+            if param_path is not None and os.path.isfile(param_path):
                 delete_file(param_path)
-            if 'seg_path' in locals() and seg_path is not None and os.path.isfile(seg_path):
-                # delete MTO segmentation map
+
+            if seg_path is not None and os.path.isfile(seg_path):
                 delete_file(seg_path)
-            if (
-                'prepped_path' in locals()
-                and prepped_path is not None
-                and os.path.isfile(prepped_path)
-            ):
-                # delete preprocessed data
+
+            if prepped_path is not None and os.path.isfile(prepped_path):
                 delete_file(prepped_path)
+
             # garbage collection to keep memory consumption low
             gc.collect()
 

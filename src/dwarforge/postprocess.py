@@ -1,7 +1,9 @@
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import cast
 
 import cv2
 import h5py
@@ -427,14 +429,14 @@ def make_cutouts(
         numpy.ndarray: cutouts of shape (n_cutouts, cutout_size, cutout_size)
     """
     if df is not None:
-        xs = np.floor(df.X.to_numpy() + 0.5).astype(np.int32)
-        ys = np.floor(df.Y.to_numpy() + 0.5).astype(np.int32)
+        xs = np.floor(df.X.to_numpy(dtype=np.float32) + 0.5).astype(np.int32)
+        ys = np.floor(df.Y.to_numpy(dtype=np.float32) + 0.5).astype(np.int32)
         object_ids = df['ID'].to_numpy()  # Assuming the index is the object ID
     elif ra is not None and dec is not None:
         wcs = WCS(header)
         xs, ys = wcs.all_world2pix(ra, dec, 0)
         xs, ys = np.floor(xs + 0.5).astype(np.int32), np.floor(ys + 0.5).astype(np.int32)
-        object_ids = np.zeros(len(xs))
+        object_ids = np.zeros(len(xs), dtype=np.int32)  # Dummy IDs
     else:
         raise ValueError('Either df or ra and dec must be provided.')
 
@@ -763,8 +765,8 @@ def match_coordinates_across_bands(
             if not group_coords:
                 continue
 
-            band_counts = defaultdict(int)
-            members_by_band = defaultdict(list)
+            band_counts: dict[str, int] = defaultdict(int)
+            members_by_band: dict[str, list[int]] = defaultdict(list)
             for idx in group_indices:
                 band = bands_map[idx]
                 band_counts[band] += 1
@@ -1043,13 +1045,13 @@ def read_band_data(
         det_df = pd.concat([det_df, det_df_dwarf], ignore_index=True)
         det_df = det_df.sort_values('ID')  # keep original order
 
-    if det_df is None:
+    if det_df.empty:
         det_df = pd.DataFrame(columns=['ra', 'dec'])
 
     return data, header, segmap, det_df['ra'].to_numpy(), det_df['dec'].to_numpy(), det_df
 
 
-def filter_candidates(df: pd.DataFrame, tile: tuple[int, int], band: str) -> pd.DataFrame | None:
+def filter_candidates(df: pd.DataFrame, tile: tuple[int, int], band: str) -> pd.DataFrame:
     df_mod = df.copy()
     if 'lsb' in df.columns:
         df_dwarf = df.loc[df['lsb'] == 1].reset_index(drop=True)
@@ -1150,20 +1152,24 @@ def filter_candidates(df: pd.DataFrame, tile: tuple[int, int], band: str) -> pd.
 
     if band not in band_conditions:
         logger.error(f'Conditions not implemented for band {band}.')
-        return None
+        return pd.DataFrame(columns=df.columns)
 
     conditions = band_conditions[band]
 
     # Apply basic conditions
-    for column, (min_val, max_val) in conditions['basic'].items():
+    basic = cast(Mapping[str, tuple[float | None, float | None]], conditions['basic'])
+    for column, (min_val, max_val) in basic.items():
         if min_val is not None:
             df_mod = df_mod[df_mod[column] > min_val]
         if max_val is not None:
             df_mod = df_mod[df_mod[column] < max_val]
 
     # Apply complex conditions
-    for condition in conditions['complex']:
-        df_mod = df_mod[condition]
+    complex_conds: list[Callable[[pd.DataFrame], pd.Series]] = cast(
+        list[Callable[[pd.DataFrame], pd.Series]], conditions['complex']
+    )
+    for condition in complex_conds:
+        df_mod = df_mod[condition(df_mod)]
 
     # Reset index
     df_mod = df_mod.reset_index(drop=True)

@@ -237,7 +237,7 @@ class ZooBot_lightning_v1(pl.LightningModule):
         self.validation_outputs.clear()
         self.validation_targets.clear()
 
-    def configure_optimizers(self):
+    def configure_optimizers(self):  # type: ignore
         # 1. Define your optimizer
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
@@ -636,7 +636,7 @@ class ZooBot_lightning(pl.LightningModule):
         self.validation_outputs.clear()
         self.validation_targets.clear()
 
-    def configure_optimizers(self):
+    def configure_optimizers(self):  # type: ignore
         """
         Configures the optimizer (AdamW) and LR scheduler (ReduceLROnPlateau).
 

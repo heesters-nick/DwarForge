@@ -177,18 +177,18 @@ def generate_rgb(
         # Apply gamma correction while preserving sign
         if gamma is not None:
             if not red_is_zero:
-                red_mask = abs(red) <= 1e-9  # type: ignore
-                red = np.sign(red) * (abs(red) ** gamma)  # type: ignore
+                red_mask = abs(red) <= 1e-9
+                red = np.sign(red) * (abs(red) ** gamma)
                 red[red_mask] = 0
 
             if not green_is_zero:
-                green_mask = abs(green) <= 1e-9  # type: ignore
-                green = np.sign(green) * (abs(green) ** gamma)  # type: ignore
+                green_mask = abs(green) <= 1e-9
+                green = np.sign(green) * (abs(green) ** gamma)
                 green[green_mask] = 0
 
             if not blue_is_zero:
-                blue_mask = abs(blue) <= 1e-9  # type: ignore
-                blue = np.sign(blue) * (abs(blue) ** gamma)  # type: ignore
+                blue_mask = abs(blue) <= 1e-9
+                blue = np.sign(blue) * (abs(blue) ** gamma)
                 blue[blue_mask] = 0
         # Stack the channels after scaling and gamma correction
         result = np.stack([red, green, blue], axis=-1).astype(np.float32)
@@ -386,7 +386,9 @@ def run_inference(model, images_np, batch_size=256, device=None):
     return np.concatenate(latent_representations)
 
 
-def process_single_tile(args):
+def process_single_tile(
+    args: tuple[str, pd.DataFrame, str, dict[str, Any], str],
+) -> dict[str, Any]:
     """
     Worker function to process objects within a single tile.
     Assumes model is pre-loaded by initializer into global 'worker_model'.
@@ -441,7 +443,9 @@ def process_single_tile(args):
     else:
         metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'z', 'zerr']
     tile_latent_vectors_list = []  # Use a list to append results
-    tile_metadata_list = {key: [] for key in metadata_keys}  # List for each metadata key
+    tile_metadata_list: dict[str, list[np.ndarray]] = {
+        key: [] for key in metadata_keys
+    }  # List for each metadata key
 
     objects_processed_in_tile = 0
     objects_not_found_in_tile = 0
@@ -452,7 +456,7 @@ def process_single_tile(args):
         # 3. Process the HDF5 file for the tile
         with h5py.File(tile_path, 'r') as src_file:
             # --- Efficient Object Selection & Loading ---
-            target_ids = tile_objects_df['unique_id'].values
+            target_ids = tile_objects_df['unique_id'].to_numpy()
             num_targets_in_catalog = len(target_ids)
 
             if 'unique_id' not in src_file:
@@ -539,21 +543,23 @@ def process_single_tile(args):
                 # 6. Store results for this tile
                 tile_latent_vectors_list.append(batch_vectors)
                 tile_metadata_list['unique_id'].append(
-                    valid_catalog_objects_sorted['unique_id'].values
+                    valid_catalog_objects_sorted['unique_id'].to_numpy()
                 )
-                tile_metadata_list['ra'].append(valid_catalog_objects_sorted['ra'].values)
-                tile_metadata_list['dec'].append(valid_catalog_objects_sorted['dec'].values)
+                tile_metadata_list['ra'].append(valid_catalog_objects_sorted['ra'].to_numpy())
+                tile_metadata_list['dec'].append(valid_catalog_objects_sorted['dec'].to_numpy())
                 tile_metadata_list['tile'].append(np.full(n_valid, tile))
                 if inference_mode == 'all_mto':
                     tile_metadata_list['zoobot_pred'].append(
-                        valid_catalog_objects_sorted['zoobot_pred'].values
+                        valid_catalog_objects_sorted['zoobot_pred'].to_numpy()
                     )
                     tile_metadata_list['zoobot_pred_v2'].append(
-                        valid_catalog_objects_sorted['zoobot_pred_v2'].values
+                        valid_catalog_objects_sorted['zoobot_pred_v2'].to_numpy()
                     )
                 else:
-                    tile_metadata_list['z'].append(valid_catalog_objects_sorted['z'].values)
-                    tile_metadata_list['zerr'].append(valid_catalog_objects_sorted['zerr'].values)
+                    tile_metadata_list['z'].append(valid_catalog_objects_sorted['z'].to_numpy())
+                    tile_metadata_list['zerr'].append(
+                        valid_catalog_objects_sorted['zerr'].to_numpy()
+                    )
                 objects_processed_in_tile = n_valid
 
                 # Cleanup memory
@@ -597,11 +603,11 @@ def process_single_tile(args):
         else:
             # Define empty array types correctly
             if key == 'unique_id':
-                dtype = np.int64
+                dtype = np.int64  # type: ignore[assignment]
             elif key in ['ra', 'dec', 'z', 'zerr', 'zoobot_pred', 'zoobot_pred_v2']:
-                dtype = np.float64
+                dtype = np.float64  # type: ignore[assignment]
             else:
-                dtype = object  # Tile will be object type
+                dtype = object  # type: ignore[assignment]
             final_tile_metadata[key] = np.array([], dtype=dtype)
 
     return {
@@ -640,6 +646,7 @@ def process_objects_with_model_parallel(
             catalog = pd.read_parquet(catalog_path)
         else:
             logger.error(f'Failed to load catalog. File type {catalog_extension} not supported.')
+            raise ValueError(f'Unsupported catalog file type: {catalog_extension}')
     except Exception as e:
         logger.error(f"Failed to load catalog '{catalog_path}': {e}")
         raise
@@ -689,7 +696,7 @@ def process_objects_with_model_parallel(
     worker_args = []
     for tile, tile_objects_df in tile_groups:
         args = (
-            tile,
+            str(tile),
             tile_objects_df.copy(),
             base_path,
             preprocessing_params,
@@ -704,7 +711,7 @@ def process_objects_with_model_parallel(
         metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'zoobot_pred', 'zoobot_pred_v2']
     else:
         metadata_keys = ['unique_id', 'ra', 'dec', 'tile', 'z', 'zerr']
-    all_metadata_accum_lists = {key: [] for key in metadata_keys}
+    all_metadata_accum_lists: dict[str, list[np.ndarray]] = {key: [] for key in metadata_keys}
 
     total_objects_processed_accum = 0  # Use a separate accumulator for the counter
     total_objects_not_found_accum = 0  # Use a separate accumulator for the counter
@@ -796,13 +803,13 @@ def process_objects_with_model_parallel(
         else:
             # Determine appropriate empty dtype based on key
             if key == 'unique_id':
-                dtype = np.int64
+                dtype = np.int64  # type: ignore[assignment]
             elif key in ['ra', 'dec', 'z', 'zerr', 'zoobot_pred', 'zoobot_pred_v2']:
-                dtype = np.float64
+                dtype = np.float64  # type: ignore[assignment]
             elif key == 'tile':
-                dtype = object  # Tiles are likely strings/objects
+                dtype = object  # type: ignore[assignment]  # Tiles are likely strings/objects
             else:
-                dtype = object  # Default fallback
+                dtype = object  # type: ignore[assignment]  # Default fallback
             final_metadata[key] = np.array([], dtype=dtype)
 
     # Final consistency check (optional but recommended)

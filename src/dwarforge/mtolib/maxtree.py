@@ -91,5 +91,5 @@ class OriginalMaxTree(MaxTree):
         self.mt_lib.mt_free.argtypes = [ct.POINTER(mt_class.MtData)]
         self.mt_lib.mt_free(ct.byref(self.mt))
 
-    def ctypes_maxtree(self):
+    def ctypes_maxtree(self):  # type: ignore
         return self.mt

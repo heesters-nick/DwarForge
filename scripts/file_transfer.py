@@ -111,10 +111,11 @@ class DriveUploader:
 
     def _upload_or_update_file(self, file_path, folder_id, existing_files=None, retry_count=0):
         """Upload a new file or update existing file if changed"""
-        try:
-            file_info = self._get_file_info(file_path)
-            filename = os.path.basename(file_path)
 
+        file_info = self._get_file_info(file_path)
+        filename = os.path.basename(file_path)
+
+        try:
             # Check if file exists in Drive and is not trashed
             existing_file = existing_files.get(filename) if existing_files is not None else None
 

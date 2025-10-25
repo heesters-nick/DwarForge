@@ -25,7 +25,7 @@ def tile_finder(
     coord_c: SkyCoord | None,
     tile_info_dir: Path,
     band_constr: int = 5,
-) -> tuple[list[tuple[int, int]] | None, list[tuple[int, int]] | None, pd.DataFrame | None]:
+) -> tuple[list[tuple[int, int]] | None, list[tuple[int, int]] | None, pd.DataFrame]:
     """
     Finds tiles a list of objects are in.
 
@@ -42,7 +42,7 @@ def tile_finder(
         catalog: updated catalog with tile information
     """
     if catalog is None or coord_c is None:
-        return None, None, None
+        return None, None, pd.DataFrame()
     available_tiles = avail.unique_tiles
     tiles_matching_catalog = np.empty(len(catalog), dtype=object)
     pix_coords = np.empty((len(catalog), 2), dtype=np.float64)
@@ -81,7 +81,7 @@ def tile_finder(
     return unique_tiles, tiles_x_bands, catalog
 
 
-def tile_band_specs(tile: tuple, in_dict: dict, band: str, download_dir: Path) -> dict:
+def tile_band_specs(tile: tuple[int, int], in_dict: dict, band: str, download_dir: Path) -> dict:
     """
     Get the necessary information for downloading a tile in a specific band.
 
@@ -128,7 +128,7 @@ def tile_band_specs(tile: tuple, in_dict: dict, band: str, download_dir: Path) -
 
 
 def download_tile_one_band(
-    tile_numbers: tuple,
+    tile_numbers: tuple[int, int],
     tile_fitsname: str,
     final_path: Path,
     final_path_binned: Path,

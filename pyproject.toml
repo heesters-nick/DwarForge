@@ -54,12 +54,20 @@ dependencies = [
 # ---- Optional dependency groups for dev tooling, tests, docs, etc. ----
 [project.optional-dependencies]
 dev = [
+    # Testing tools
     "pytest>=8.0",
     "pytest-mock",
     "pytest-cov>=4.0",
     'pre-commit>=4.0',
+    # Code quality tools
     "ruff>=0.5.7",
     "mypy>=1.18.2",
+    # Type stubs for better type checking
+    "pandas-stubs",
+    "types-PyYAML",
+    "types-tqdm",
+    "scipy-stubs",
+    "types-psutil",
 ]
 
 # ---- Test configuration ----
@@ -75,10 +83,28 @@ addopts = [
 [tool.mypy]
 python_version = "3.11"
 strict = false
-warn_unused_ignores = true
+warn_unused_ignores = false
 warn_redundant_casts = true
 disallow_any_generics = false
 files = ["src"]
+
+[[tool.mypy.overrides]]
+module = [
+    "h5py.*",
+    "astropy.*",
+    "astroquery.*",
+    "photutils.*",
+    "sep",
+    "pywt",
+    "zoobot.*",
+    "pyarrow.*",
+    "joblib",
+    "astride",
+    "vos",
+    "sklearn.*",
+    "PIL",
+]
+ignore_missing_imports = true
 
 # ---- Ruff configuration ----
 [tool.ruff]

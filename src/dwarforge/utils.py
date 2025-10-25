@@ -76,8 +76,8 @@ def query_gaia_stars(target_coord, r_arcsec, max_retries=3, retry_delay=5):
     Returns:
         table (dataframe): non-galaxy Gaia sources within the search radius.
     """
-    Gaia.MAIN_GAIA_TABLE = 'gaiadr3.gaia_source'  # type: ignore # Select Data Release 3
-    Gaia.ROW_LIMIT = -1  # unlimited rows  # type: ignore
+    Gaia.MAIN_GAIA_TABLE = 'gaiadr3.gaia_source'  # type: ignore  # Select Data Release 3
+    Gaia.ROW_LIMIT = -1  # unlimited rows
     columns = ['source_id', 'ra', 'dec', 'phot_g_mean_mag', 'in_galaxy_candidates']
 
     for attempt in range(max_retries):
@@ -716,7 +716,7 @@ def read_parquet(parquet_path, ra_range, dec_range, columns=None):
     return df
 
 
-def is_mostly_zeros(file_path, file_path_binned, fits_ext, band):
+def is_mostly_zeros(file_path: Path, file_path_binned: Path, fits_ext: int, band: str) -> bool:
     if file_path_binned.is_file():
         return False
     # HSC data is compressed, decompress for faster read speed later
@@ -728,7 +728,7 @@ def is_mostly_zeros(file_path, file_path_binned, fits_ext, band):
         data, _ = open_fits(file_path, fits_ext)
 
     frac_zeros = np.count_nonzero(data == 0.0) / len(data.flatten())
-    if frac_zeros > 1.0:
+    if frac_zeros > 0.95:
         return True
     else:
         return False

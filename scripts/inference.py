@@ -380,7 +380,9 @@ def worker_process_shared(
     for tile_info in tile_batch:
         tile_number = tile_info['tile_number']
         h5_path = tile_info['h5_path']
+        h5_temp_path = f'{h5_path}.temp'
         parquet_path = tile_info['parquet_path']
+        parquet_temp_path = f'{parquet_path}.temp'
 
         logger.debug(f'Worker {worker_pid} processing tile {tile_number}')
 
@@ -423,7 +425,6 @@ def worker_process_shared(
             )
 
             # Update H5 file with predictions
-            h5_temp_path = f'{h5_path}.temp'
             shutil.copy2(h5_path, h5_temp_path)
             with h5py.File(h5_temp_path, 'r+') as h5_temp:
                 if 'zoobot_pred_v2' in h5_temp:
@@ -436,7 +437,6 @@ def worker_process_shared(
             df = pd.read_parquet(parquet_path)
             prediction_map = dict(zip(object_ids, all_predictions, strict=False))  # type: ignore
             df['zoobot_pred_v2'] = df['unique_id'].map(prediction_map)
-            parquet_temp_path = f'{parquet_path}.temp'
             df.to_parquet(parquet_temp_path, index=False)
             os.replace(parquet_temp_path, parquet_path)
 
@@ -447,16 +447,20 @@ def worker_process_shared(
                 f'Worker {worker_pid}: Error processing tile {tile_number}: {e}\n{traceback.format_exc()}'
             )
             # Clean up temp files if they exist
-            if 'h5_temp_path' in locals() and os.path.exists(h5_temp_path):
+            if os.path.exists(h5_temp_path):
                 try:
                     os.remove(h5_temp_path)
-                except OSError:
-                    pass
-            if 'parquet_temp_path' in locals() and os.path.exists(parquet_temp_path):
+                    logger.debug(f'Removed temp file: {h5_temp_path}')
+                except OSError as cleanup_error:
+                    logger.warning(f'Failed to remove {h5_temp_path}: {cleanup_error}')
+
+            if os.path.exists(parquet_temp_path):
                 try:
                     os.remove(parquet_temp_path)
-                except OSError:
-                    pass
+                    logger.debug(f'Removed temp file: {parquet_temp_path}')
+                except OSError as cleanup_error:
+                    logger.warning(f'Failed to remove {parquet_temp_path}: {cleanup_error}')
+
             failed_tiles.append(tile_info)
 
     # Collect garbage but don't delete shared models
@@ -1026,6 +1030,12 @@ def run_test(config):
     Args:
         config (dict): Configuration dictionary
     """
+    # Initialize summary variables
+    successful_tiles = 0
+    success_rate = 0.0
+    total_time = 0.0
+    failed_tiles = []
+
     processing_mode = config['processing_mode']
     logger.info(f'Starting TEST MODE inference using {processing_mode.upper()} processing mode')
 

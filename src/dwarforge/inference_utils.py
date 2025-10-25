@@ -279,7 +279,9 @@ def cpu_write_worker(results_queue, error_queue, completion_queue, done_event, c
                 tile_info = result['tile_info']
                 tile_number = tile_info['tile_number']
                 h5_path = tile_info['h5_path']
+                h5_temp_path = f'{h5_path}.temp'
                 parquet_path = tile_info['parquet_path']
+                parquet_temp_path = f'{parquet_path}.temp'
 
                 predictions = result['predictions']
                 object_ids = result['object_ids']
@@ -288,9 +290,6 @@ def cpu_write_worker(results_queue, error_queue, completion_queue, done_event, c
 
                 try:
                     # === SAFELY UPDATE H5 FILE ===
-                    # Create a temporary file path
-                    h5_temp_path = f'{h5_path}.temp'
-
                     # Copy the original file to temporary path
                     shutil.copy2(h5_path, h5_temp_path)
 
@@ -320,7 +319,6 @@ def cpu_write_worker(results_queue, error_queue, completion_queue, done_event, c
                     df['zoobot_pred_v2'] = df['unique_id'].map(prediction_map)
 
                     # Write to temporary file
-                    parquet_temp_path = f'{parquet_path}.temp'
                     df.to_parquet(parquet_temp_path, index=False)
 
                     # Atomic rename

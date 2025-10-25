@@ -452,6 +452,10 @@ def replace_with_local_background(
 
         is_bright_star = star.Gmag < 15.0
 
+        # Initialize star_region and bg_segments
+        star_region = np.zeros_like(local_region, dtype=np.uint8)
+        bg_segments = np.zeros_like(local_region, dtype=np.uint8)
+
         if band == 'cfis_lsb-r':
             if is_bright_star and star_case not in ['embedded', 'not_deblended']:
                 star_region, bg_segments = process_bright_star(
@@ -694,7 +698,7 @@ def mask_stars(
     full_star_df = star_fit(star_df)
 
     # check if there is a bright star in the field
-    gmag_brightest = np.min(star_df['Gmag'].to_numpy())
+    gmag_brightest = np.min(star_df['Gmag'].to_numpy(dtype=float))
 
     bkg_factor = 5.0
     if gmag_brightest < 9.0:
@@ -1061,7 +1065,7 @@ def mask_hot_pixels(
 
 
 def prep_tile(
-    tile: str,
+    tile: tuple[int, int],
     file_path: Path,
     file_path_binned: Path,
     fits_ext: int,
@@ -1568,6 +1572,7 @@ def determine_star_case(
     # check if the expencted segment of the star to be classified is adjacent to or overlapping with
     # other bright stars. If so, it should not be classified as not_deblended
     border_segments_check = np.array([])
+    adjacent_to_star = False
     if potentially_not_deblended:
         star_mask_check = np.zeros((h, w), dtype=np.uint8)
         cv2.circle(star_mask_check, (x, y), r, 1, -1, lineType=cv2.LINE_AA)  # type: ignore
@@ -1583,7 +1588,6 @@ def determine_star_case(
         border_segments_check = np.unique(segmap[border_mask_check == 1])
 
         # Check if any surrounding segment is a star
-        adjacent_to_star = False
         for segment_id in border_segments_check:
             if segment_id != 0 and segment_id != star_segment:
                 adj_obj = object_df[object_df['ID'] == segment_id]
