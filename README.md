@@ -1,5 +1,10 @@
 # DwarForge
 
+[![CI](https://github.com/heesters-nick/dwarforge/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/heesters-nick/dwarforge/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![Type checked: mypy](https://img.shields.io/badge/type%20checked-mypy-blue.svg)](http://mypy-lang.org/)
+
 Dwarforge is an automated pipeline for the detection and classification of dwarf galaxy candidates in wide-field imaging surveys. The project is tuned for data from the Ultraviolet Near-Infrared Optical Northern Survey (UNIONS). The pipeline combines classical detection with MTObjects (MTO) (see [MTO GitHub repo](https://github.com/CarolineHaigh/mtobjects)) and deep learning classification via a fine-tuned model from the [Zoobot project](https://github.com/mwalmsley/zoobot). This repository was used to produce Galaxies OBserved as Low-luminosity Identified Nebulae (GOBLIN); a catalog of 43,000 dwarf galaxy candidates in the UNIONS survey (see [GOBLIN paper](https://ui.adsabs.harvard.edu/abs/2025A%26A...699A.232H/abstract) and [GOBLIN catalog](https://cdsarc.cds.unistra.fr/viz-bin/cat/J/A+A/699/A232)). If you use DwarForge in academic work, please cite the GOBLIN catalog paper and this repository. See “Citing” below.
 
 ## Installation
